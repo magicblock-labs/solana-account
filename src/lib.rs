@@ -1,12 +1,11 @@
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 //! The Solana [`Account`] type.
 
-use std::{ops::{Deref, DerefMut}, sync::atomic::AtomicU64};
-
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
 #[cfg(feature = "serde")]
 use serde::ser::{Serialize, Serializer};
+use shared::{AccountSharedDataBorrowed, AccountSharedDataOwned};
 use {
     solana_account_info::{debug_account_data::*, AccountInfo},
     solana_clock::{Epoch, INITIAL_RENT_EPOCH},
@@ -24,6 +23,8 @@ use {
 };
 #[cfg(feature = "bincode")]
 pub mod state_traits;
+
+pub mod shared;
 
 /// An Account with data that is stored on chain
 #[repr(C)]
@@ -106,62 +107,6 @@ pub enum AccountSharedData {
     Borrowed(AccountSharedDataBorrowed),
     Owned(AccountSharedDataOwned),
 }
-
-#[derive(Clone, PartialEq, Eq)]
-pub struct AccountSharedDataBorrowed {
-    /// lamports in the account
-    lamports: *mut u64,
-    /// data held in this account
-    data: ExtendableDataSlice,
-    /// the program that owns this account. If executable, the program that loads this account.
-    owner: *mut Pubkey,
-    /// this account's data contains a loaded program (and is now read-only)
-    executable: *mut bool,
-    /// the epoch at which this account will next owe rent
-    rent_epoch: Epoch,
-     
-}
-
-#[derive(Clone, PartialEq, Eq)]
-pub struct ExtendableDataSlice {
-    ptr: *mut u8,
-    capacity: u32,
-    len: u32,
-}
-
-impl Deref for ExtendableDataSlice {
-    type Target = [u8];
-    fn deref(&self) -> &Self::Target {
-        unsafe { std::slice::from_raw_parts(self.ptr, self.len as usize) }
-    }
-}
-
-impl DerefMut for ExtendableDataSlice {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len as usize) }
-    }
-}
-
-#[derive(Clone, PartialEq, Eq, Default)]
-pub struct AccountSharedDataOwned {
-    /// lamports in the account
-    lamports: u64,
-    /// data held in this account
-    data: Arc<Vec<u8>>,
-    /// the program that owns this account. If executable, the program that loads this account.
-    owner: Pubkey,
-    /// this account's data contains a loaded program (and is now read-only)
-    executable: bool,
-    /// the epoch at which this account will next owe rent
-    rent_epoch: Epoch,
-}
-
-impl Default for AccountSharedData {
-    fn default() -> Self {
-        Self::Owned(AccountSharedDataOwned::default())
-    }
-}
-
 /// Compares two ReadableAccounts
 ///
 /// Returns true if accounts are essentially equivalent as in all fields are equivalent.
@@ -181,8 +126,8 @@ impl From<AccountSharedData> for Account {
                     lamports: *acc.lamports,
                     data: acc.data.to_vec(),
                     owner: *acc.owner,
-                    executable: *acc.executable,
-                    rent_epoch: acc.rent_epoch,
+                    executable: acc.executable,
+                    rent_epoch: Epoch::MAX,
                 }
             },
             AccountSharedData::Owned(mut acc) => {
@@ -323,22 +268,29 @@ impl WritableAccount for Account {
 impl WritableAccount for AccountSharedData {
     fn set_lamports(&mut self, lamports: u64) {
         match self {
-            Self::Borrowed(acc) => unsafe { *acc.lamports = lamports },
+            Self::Borrowed(acc) => unsafe {
+                acc.cow();
+                *acc.lamports = lamports;
+            },
             Self::Owned(acc) => acc.lamports = lamports,
         }
     }
     fn data_as_mut_slice(&mut self) -> &mut [u8] {
-        &mut self.data_mut()[..]
+        self.data_mut()
     }
     fn set_owner(&mut self, owner: Pubkey) {
         match self {
-            Self::Borrowed(acc) => unsafe { *acc.owner = owner },
+            Self::Borrowed(acc) => unsafe {
+                acc.cow();
+                *acc.owner = owner
+            },
             Self::Owned(acc) => acc.owner = owner,
         }
     }
     fn copy_into_owner_from_slice(&mut self, source: &[u8]) {
         match self {
             Self::Borrowed(acc) => unsafe {
+                acc.cow();
                 (acc.owner as *mut u8)
                     .copy_from_nonoverlapping(source.as_ptr(), size_of::<Pubkey>());
             },
@@ -347,14 +299,18 @@ impl WritableAccount for AccountSharedData {
     }
     fn set_executable(&mut self, executable: bool) {
         match self {
-            Self::Borrowed(acc) => unsafe { *acc.executable = executable },
+            Self::Borrowed(acc) => {
+                // this is basically a noop, as it's impossible to
+                // change executableness for borrowend account
+                acc.executable = executable
+            }
             Self::Owned(acc) => acc.executable = executable,
         }
     }
     fn set_rent_epoch(&mut self, epoch: Epoch) {
-        match self {
-            Self::Borrowed(acc) => acc.rent_epoch = epoch,
-            Self::Owned(acc) => acc.rent_epoch = epoch,
+        // noop for Borrowed accounts, as the rent_epoch is not even stored anywhere
+        if let Self::Owned(acc) = self {
+            acc.rent_epoch = epoch
         }
     }
     fn create(
@@ -395,13 +351,13 @@ impl ReadableAccount for AccountSharedData {
     }
     fn executable(&self) -> bool {
         match self {
-            Self::Borrowed(acc) => unsafe { *acc.executable },
+            Self::Borrowed(acc) => acc.executable,
             Self::Owned(acc) => acc.executable,
         }
     }
     fn rent_epoch(&self) -> Epoch {
         match self {
-            Self::Borrowed(acc) => acc.rent_epoch,
+            Self::Borrowed(_) => Epoch::MAX,
             Self::Owned(acc) => acc.rent_epoch,
         }
     }
@@ -637,7 +593,7 @@ impl AccountSharedData {
     pub fn is_shared(&self) -> bool {
         match self {
             Self::Owned(acc) => Arc::strong_count(&acc.data) > 1,
-            Self::Borrowed(_) => false,
+            Self::Borrowed(_) => true,
         }
     }
 
@@ -648,14 +604,15 @@ impl AccountSharedData {
                     *acc.lamports,
                     (*acc.data).to_vec(),
                     *acc.owner,
-                    *acc.executable,
-                    acc.rent_epoch,
+                    acc.executable,
+                    Epoch::MAX,
                 )
             };
         }
     }
 
     pub fn reserve(&mut self, additional: usize) {
+        self.ensure_owned();
         if let Self::Owned(acc) = self {
             if let Some(data) = Arc::get_mut(&mut acc.data) {
                 data.reserve(additional)
@@ -670,10 +627,11 @@ impl AccountSharedData {
     pub fn capacity(&self) -> usize {
         match self {
             Self::Owned(acc) => acc.data.capacity(),
-            Self::Borrowed(acc) => acc.data.capacity as usize,
+            Self::Borrowed(_) => 0,
         }
     }
 
+    #[inline]
     fn data_mut(&mut self) -> &mut [u8] {
         match self {
             Self::Owned(acc) => Arc::make_mut(&mut acc.data).as_mut_slice(),
@@ -682,35 +640,41 @@ impl AccountSharedData {
     }
 
     pub fn resize(&mut self, new_len: usize, value: u8) {
-        // Borrowed always has enough capacity
-        if let Self::Owned(acc) = self {
-            Arc::make_mut(&mut acc.data).resize(new_len, value)
+        if new_len > self.data().len() {
+            self.ensure_owned();
+        }
+        match self {
+            Self::Owned(acc) => Arc::make_mut(&mut acc.data).resize(new_len, value),
+            Self::Borrowed(acc) => {
+                // we didn't grow, which means we shrunk, truncate the data
+                acc.data.len = new_len;
+                // dirty hack: len u32 is guaranteed to be located 4 bytes before the
+                // data pointer, we jump back to it and modify
+                unsafe { (acc.data.ptr.offset(-4) as *mut u32).write(new_len as u32) };
+            }
         }
     }
 
     pub fn extend_from_slice(&mut self, data: &[u8]) {
-        match self {
-            Self::Borrowed(acc) => unsafe {
-                acc.data
-                    .ptr
-                    .add(acc.data.len as usize)
-                    .copy_from_nonoverlapping(data.as_ptr(), data.len());
-                acc.data.len += data.len() as u32;
-            },
-            Self::Owned(acc) => Arc::make_mut(&mut acc.data).extend_from_slice(data),
+        self.ensure_owned();
+        if let Self::Owned(acc) = self {
+            Arc::make_mut(&mut acc.data).extend_from_slice(data)
         }
     }
 
     pub fn set_data_from_slice(&mut self, new_data: &[u8]) {
         let new_len = new_data.len();
         let new_ptr = new_data.as_ptr();
+        if new_len > self.data().len() {
+            self.ensure_owned();
+        }
         let acc = match self {
             Self::Borrowed(acc) => {
-                debug_assert!(acc.data.capacity as usize > new_len);
                 unsafe {
+                    acc.cow();
                     acc.data.ptr.copy_from_nonoverlapping(new_ptr, new_len);
                 }
-                acc.data.len = new_len as u32;
+                acc.data.len = new_len;
                 return;
             }
             Self::Owned(acc) => acc,
@@ -764,10 +728,9 @@ impl AccountSharedData {
     pub fn spare_data_capacity_mut(&mut self) -> &mut [MaybeUninit<u8>] {
         match self {
             Self::Borrowed(acc) => {
-                let mut ptr = acc.data.ptr as *mut MaybeUninit<u8>;
-                ptr = unsafe { ptr.add(acc.data.len as usize) };
-                let len = (acc.data.capacity.saturating_sub(acc.data.len)) as usize;
-                unsafe { std::slice::from_raw_parts_mut(ptr, len) }
+                // we don't really have any further capacity
+                let ptr = acc.data.ptr as *mut MaybeUninit<u8>;
+                unsafe { std::slice::from_raw_parts_mut(ptr, 0) }
             }
             Self::Owned(acc) => Arc::make_mut(&mut acc.data).spare_capacity_mut(),
         }
@@ -824,83 +787,7 @@ impl AccountSharedData {
     pub fn serialize_data<T: serde::Serialize>(&mut self, state: &T) -> Result<(), bincode::Error> {
         shared_serialize_data(self, state)
     }
-    const ACCOUNT_STATIC_SIZE: usize = 
-        // lamports
-        size_of::<u64>() +
-        // owner
-        size_of::<Pubkey>() + 
-        // data length
-        size_of::<u32>() +
-        // executable flag
-        size_of::<u32>();
-
-    /// # Safety
-    /// memptr should point to valid and exclusively owned memory mapped region, memory
-    /// should be properly aligned to 8 bytes, memory should have enough capacity to fit all
-    /// account data and 40 bytes of static fields
-    pub unsafe fn serialize_to_mmap(&self, mut memptr: *mut u8, shadow_offset: Option<u32>) {
-        let Self::Owned(acc) = self else {
-            return;
-        };
-        // write 8 bytes for lamports
-        (memptr as *mut u64).write(acc.lamports);
-        memptr =  memptr.add(size_of::<u64>());
-        // write 32 bytes for owner
-        memptr.copy_from_nonoverlapping(acc.owner.as_ref().as_ptr(), size_of::<Pubkey>());
-        memptr =  memptr.add(size_of::<Pubkey>());
-        // write 4 bytes for data length
-        (memptr as *mut u32).write(acc.data.len() as u32);
-        memptr =  memptr.add(size_of::<u32>());
-        (memptr as *mut u32).write(acc.executable as u32);
-        memptr = memptr.add(size_of::<u32>());
-        // we have advanced 40 bytes, and now we can write the entire data content
-        memptr.copy_from_nonoverlapping(acc.data.as_ptr(), acc.data.len());
-    }
-
-    /// # Safety
-    /// memptr should be properly aligned to 8 bytes, be exclusively 
-    /// owned by caller and contain properly serialized account data
-    pub unsafe fn deserialize_from_mmap_rw(mut memptr: *mut u8) -> Self {
-        // check shadow switch to determine which buffer to use
-        let shadow_switch = memptr as *mut u64;
-        memptr = memptr.add(size_of::<u64>());
-        memptr = if shadow_switch.read() % 2 == 1 {
-            // use data from second buffer for odd value
-            let shadow = memptr.add(Self::ACCOUNT_STATIC_SIZE);
-            memptr.copy_from_nonoverlapping(shadow, Self::ACCOUNT_STATIC_SIZE); 
-            memptr
-        } else {
-            // use data from first buffer for even value
-            let shadow = memptr.add(Self::ACCOUNT_STATIC_SIZE);
-            shadow.copy_from_nonoverlapping(memptr, Self::ACCOUNT_STATIC_SIZE);
-            shadow
-        };
-        todo!();
-    }
-    /// # Safety
-    /// memptr should be properly aligned to 8 bytes, be exclusively 
-    /// owned by caller and contain properly serialized account data
-    /// data should point to correct location in memory where account's 
-    /// data is written to
-    pub unsafe fn deserialize_from_mmap_ro(mut memptr: *mut u8, data: *mut u8) -> Self {
-        // write 8 bytes for lamports
-        (memptr as *mut u64).write(acc.lamports);
-        memptr = unsafe { memptr.add(size_of::<u64>()) };
-        // write 32 bytes for owner
-        memptr.copy_from_nonoverlapping(acc.owner.as_ref().as_ptr(), size_of::<Pubkey>());
-        memptr = unsafe { memptr.add(size_of::<Pubkey>()) };
-        // write 4 bytes for data length
-        (memptr as *mut u32).write(acc.data.len() as u32);
-        memptr = unsafe { memptr.add(size_of::<u32>()) };
-        // write 4 bytes for executable field, we have to waste 3 bytes for alignment
-        (memptr as *mut u32).write(acc.executable as u32);
-        memptr = unsafe { memptr.add(size_of::<u32>()) };
-        // we have advanced 40 bytes, write the entire data content
-        memptr.copy_from_nonoverlapping(acc.data.as_ptr(), acc.data.len());
-        todo!();
-    }
 }
-
 pub type InheritableAccountFields = (u64, Epoch);
 pub const DUMMY_INHERITABLE_ACCOUNT_FIELDS: InheritableAccountFields = (1, INITIAL_RENT_EPOCH);
 
