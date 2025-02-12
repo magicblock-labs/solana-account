@@ -11,8 +11,12 @@ use solana_pubkey::Pubkey;
 
 use crate::AccountSharedData;
 
+/// Memory optimized version of account shared data, which internally uses raw pointers to
+/// manipulate database (memory mapped) directly. If the account is modified, the modification
+/// triggers Copy on Write and all the changes are written to shadow buffer which can be discarded
+/// if necessary (e.g. transaction fails).  
 #[derive(Clone, PartialEq, Eq)]
-pub struct AccountSharedDataBorrowed {
+pub struct AccountBorrowed {
     /// shadow buffer switch counter
     shadow_switch: ShadowSwitch,
     /// number of bytes to jump (and the direction) at which shadow counterpart
@@ -28,7 +32,12 @@ pub struct AccountSharedDataBorrowed {
     pub(crate) executable: bool, // we don't use pointer as this field is pretty much static once set (on chain)
 }
 
-impl AccountSharedDataBorrowed {
+unsafe impl Send for AccountBorrowed {}
+// NOTE!: this variant of AccountSharedData should not be write accessed from different threads
+// without some kind of synchronization like locks, otherwise it's a UB
+unsafe impl Sync for AccountBorrowed {}
+
+impl AccountBorrowed {
     /// Copies the modifiable section of account (serialized form) into shadow buffer
     ///
     /// # Safety
@@ -58,15 +67,40 @@ impl AccountSharedDataBorrowed {
         // prevent further copy on writes
         self.shadow_offset = 0;
     }
-    // make current shadow buffer active by advancing the counter
+    /// make current shadow buffer active by advancing the counter
     #[inline(always)]
-    pub fn commit(self) {
+    pub fn commit(&self) {
         self.shadow_switch.increment();
+    }
+
+    /// Performs direct memory jump to owner field and compares
+    /// owner with `others`, no deserialization is performed
+    /// _Note_: if account has 0 lamports, None is returned
+    ///
+    /// # Safety
+    /// The memptr should point to initialized memory region where account is laid out
+    /// along with shadow buffer
+    pub unsafe fn any_owner_matches(memptr: *mut u8, others: &[Pubkey]) -> Option<usize> {
+        // get the correct buffer to read the owner from
+        let Deserialization {
+            mut deserializer, ..
+        } = AccountSharedData::init_deserialization(memptr);
+        // check non-zero lamports
+        (deserializer.read_val::<u64>() != 0).then_some(())?;
+        let owner = deserializer.read::<Pubkey>();
+        for (i, o) in others.iter().enumerate() {
+            if *owner == *o {
+                return Some(i);
+            }
+        }
+        None
     }
 }
 
+/// Solana backward compatible version of account shared data AccountBorrowed will be promoted to
+/// AccountOwned, if data field is grown
 #[derive(Clone, PartialEq, Eq, Default)]
-pub struct AccountSharedDataOwned {
+pub struct AccountOwned {
     /// lamports in the account
     pub(crate) lamports: u64,
     /// data held in this account
@@ -81,8 +115,14 @@ pub struct AccountSharedDataOwned {
 
 impl Default for AccountSharedData {
     fn default() -> Self {
-        Self::Owned(AccountSharedDataOwned::default())
+        Self::Owned(AccountOwned::default())
     }
+}
+
+struct Deserialization {
+    deserializer: BytesSerDe,
+    shadow_switch: ShadowSwitch,
+    shadow_offset: isize,
 }
 
 struct BytesSerDe {
@@ -119,7 +159,7 @@ impl BytesSerDe {
         self.ptr = self.ptr.add(size_of::<T>());
         value
     }
-    /// read the actuall value Copy from memory location and advance the cursor
+    /// read the actual Copy value from memory location and advance the cursor
     unsafe fn read_val<T: Sized + Copy>(&mut self) -> T {
         let value = (self.ptr as *mut T).read();
         self.ptr = self.ptr.add(size_of::<T>());
@@ -146,7 +186,8 @@ impl BytesSerDe {
 /// 8. | 8 byte align padding     |
 /// 9. | shadow copy of 3-7       |
 impl AccountSharedData {
-    const SERIALIZATION_ALIGNMENT: usize = size_of::<u64>();
+    pub const SERIALIZED_META_SIZE: usize = size_of::<u64>();
+    const SERIALIZATION_ALIGNMENT: usize = align_of::<u64>();
     const ACCOUNT_STATIC_SIZE: usize =
         // lamports
         size_of::<u64>() +
@@ -168,7 +209,7 @@ impl AccountSharedData {
     /// memptr should point to valid and exclusively owned memory region, memory should be
     /// properly aligned to 8 bytes, memory should have enough capacity to fit account' data and
     /// static fields (use [Self::serialized_size_aligned]) + 8 bytes of metadata
-    pub unsafe fn serialize_to_mmap(acc: &AccountSharedDataOwned, memptr: *mut u8) {
+    pub unsafe fn serialize_to_mmap(acc: &AccountOwned, memptr: *mut u8) {
         let size = Self::serialized_size_aligned(acc.data.len()) as u32;
         println!("size: {size}");
         let mut serializer = BytesSerDe::new(memptr);
@@ -191,9 +232,35 @@ impl AccountSharedData {
     }
 
     /// # Safety
-    /// memptr should be properly aligned to 8 bytes and contain properly serialized account data
+    /// memptr should be aligned to 8 bytes and contain properly serialized account data
     /// along with correcly reserved shadow buffer for copy on write operations
-    pub unsafe fn deserialize_from_mmap(memptr: *mut u8) -> Self {
+    pub unsafe fn deserialize_from_mmap(memptr: *mut u8) -> AccountBorrowed {
+        let Deserialization {
+            mut deserializer,
+            shadow_switch,
+            shadow_offset,
+        } = Self::init_deserialization(memptr);
+        // read 8 bytes for lamports
+        let lamports = deserializer.read::<u64>();
+        // read 32 bytes for owner
+        let owner = deserializer.read::<Pubkey>();
+        // skip 3 bytes of padding before boolean flag
+        deserializer.skip(3);
+        // read a single byte for boolean executable flag
+        let executable = *deserializer.read::<bool>();
+        // read the data slice
+        let data = deserializer.read_slice();
+        AccountBorrowed {
+            lamports,
+            owner,
+            data,
+            executable,
+            shadow_offset,
+            shadow_switch,
+        }
+    }
+
+    unsafe fn init_deserialization(memptr: *mut u8) -> Deserialization {
         let mut deserializer = BytesSerDe::new(memptr);
         let shadow_switch = ShadowSwitch::from(deserializer.read::<AtomicU32>());
         let is_odd = shadow_switch.counter() % 2 == 1;
@@ -205,28 +272,15 @@ impl AccountSharedData {
         if is_odd {
             // jump to second buffer to start deserializing from there
             deserializer = BytesSerDe::new(memptr.offset(shadow_offset));
-            // set shadow_offset to negative value, will jump back to first buffer upon CoW
+            // set shadow_offset to negative value, so
+            // it will jump back to first buffer upon CoW
             shadow_offset = -shadow_offset;
         }
-        // read 8 bytes for lamports
-        let lamports = deserializer.read::<u64>();
-        // read 32 bytes for owner
-        let owner = deserializer.read::<Pubkey>();
-        // skip 3 bytes of padding before boolean flag
-        deserializer.skip(3);
-        // read a single byte for boolean executable flag
-        let executable = *deserializer.read::<bool>();
-        // read the slice b
-        let data = deserializer.read_slice();
-        let account = AccountSharedDataBorrowed {
-            lamports,
-            owner,
-            data,
-            executable,
+        Deserialization {
+            deserializer,
             shadow_offset,
             shadow_switch,
-        };
-        Self::Borrowed(account)
+        }
     }
 }
 
@@ -288,8 +342,8 @@ mod tests {
     use super::*;
     use std::alloc::Layout;
 
-    const BUFFER_SIZE: usize = 2252525;
-    const LAMPORTS: u64 = 23425252;
+    const BUFFER_SIZE: usize = 225252;
+    const LAMPORTS: u64 = 2342525;
     const SPACE: usize = 2525;
     const OWNER: Pubkey = Pubkey::new_from_array([5; 32]);
 
@@ -313,35 +367,35 @@ mod tests {
     }
 
     use crate::{accounts_equal, ReadableAccount, WritableAccount};
+    macro_rules! setup {
+        () => {{
+            let buffer = BufferArea::new();
+            let owned = account();
+            let AccountSharedData::Owned(ref acc) = owned else {
+                panic!("invalid AccountSharedData initialization");
+            };
+            unsafe { AccountSharedData::serialize_to_mmap(acc, buffer.ptr) };
+            let borrowed = unsafe { AccountSharedData::deserialize_from_mmap(buffer.ptr) };
+            let borrowed = AccountSharedData::Borrowed(borrowed);
+            (buffer, owned, borrowed)
+        }};
+    }
 
     fn account() -> AccountSharedData {
         AccountSharedData::new_rent_epoch(LAMPORTS, SPACE, &OWNER, Epoch::MAX)
     }
     #[test]
     fn test_serde() {
-        let buffer = BufferArea::new();
-
-        let owned = account();
-        let AccountSharedData::Owned(ref acc) = owned else {
-            panic!("invalid AccountSharedData initialization");
-        };
-        unsafe { AccountSharedData::serialize_to_mmap(acc, buffer.ptr) };
-        let borrowed = unsafe { AccountSharedData::deserialize_from_mmap(buffer.ptr) };
-        println!("OWNED: {owned:?}");
-        println!("BORROWED: {borrowed:?}");
-        assert!(accounts_equal(&borrowed, &owned));
+        let (_, owned, borrowed) = setup!();
+        assert!(
+            accounts_equal(&borrowed, &owned),
+            "deserialization of serialized account should result in the same account"
+        );
     }
 
     #[test]
     fn test_shadow_switch() {
-        let buffer = BufferArea::new();
-
-        let owned = account();
-        let AccountSharedData::Owned(ref acc) = owned else {
-            panic!("invalid AccountSharedData initialization");
-        };
-        unsafe { AccountSharedData::serialize_to_mmap(acc, buffer.ptr) };
-        let mut borrowed = unsafe { AccountSharedData::deserialize_from_mmap(buffer.ptr) };
+        let (buffer, _, mut borrowed) = setup!();
 
         let shadow_switch = buffer.ptr as *const u32;
         let offset = AccountSharedData::serialized_size_aligned(borrowed.data().len()) as isize;
@@ -349,15 +403,70 @@ mod tests {
         assert_eq!(borrowed.lamports(), LAMPORTS);
         unsafe { assert_eq!(*shadow_switch, 0) };
         borrowed.set_lamports(42);
-        assert_eq!(borrowed.lamports(), 42);
+        assert_eq!(
+            borrowed.lamports(),
+            42,
+            "expected lamports to updated to new value"
+        );
         if let AccountSharedData::Borrowed(bacc) = borrowed {
-            assert_eq!(bacc.lamports, unsafe {
-                buffer.ptr.offset(8 + offset) as *mut u64
-            });
+            assert_eq!(
+                bacc.lamports,
+                unsafe { buffer.ptr.offset(8 + offset) as *mut u64 },
+                "expected lamports pointer to be translated to shadow buffer"
+            );
             bacc.commit();
         } else {
             panic!("expected AccountSharedDataBorrowed, found Owned version");
         }
-        unsafe { assert_eq!(*shadow_switch, 1) }
+        unsafe {
+            assert_eq!(
+                *shadow_switch, 1,
+                "shadow_switch should have been incrmented"
+            )
+        }
+    }
+
+    #[test]
+    fn test_upgrade_to_owned() {
+        let (_, owned, mut borrowed) = setup!();
+        let len = borrowed.data().len();
+        let msg = b"hello world?";
+        borrowed.extend_from_slice(msg);
+        assert_eq!(
+            &borrowed.data()[len..],
+            msg,
+            "message should have been extended with new slice"
+        );
+        assert!(
+            matches!(borrowed, AccountSharedData::Owned(_)),
+            "Borrowed account should have been upgraded to Owned upon slice extension"
+        );
+        assert_ne!(
+            owned, borrowed,
+            "two accounts should be different objects in memory"
+        );
+    }
+
+    #[test]
+    fn test_setting_date_from_slice() {
+        let (_, _, mut borrowed) = setup!();
+        let len = borrowed.data().len();
+        let msg = b"hello world?";
+        borrowed.set_data_from_slice(msg);
+        assert_eq!(borrowed.data(), msg, "account data should have changed");
+        assert_ne!(
+            borrowed.data().len(),
+            len,
+            "account data length should have decreased"
+        );
+        assert_eq!(
+            borrowed.data().len(),
+            msg.len(),
+            "account data len should be equal to that of slice"
+        );
+        assert!(
+            matches!(borrowed, AccountSharedData::Borrowed(_)),
+            "Borrowed account should not have been upgraded to Owned when slice length is less than the original"
+        );
     }
 }

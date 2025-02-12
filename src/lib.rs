@@ -1,17 +1,17 @@
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 //! The Solana [`Account`] type.
 
+use cow::{AccountBorrowed, AccountOwned};
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
 #[cfg(feature = "serde")]
 use serde::ser::{Serialize, Serializer};
-use shared::{AccountSharedDataBorrowed, AccountSharedDataOwned};
+use solana_sysvar::Sysvar;
 use {
     solana_account_info::{debug_account_data::*, AccountInfo},
     solana_clock::{Epoch, INITIAL_RENT_EPOCH},
     solana_instruction::error::LamportsError,
     solana_pubkey::Pubkey,
-    solana_sdk_ids::{bpf_loader, bpf_loader_deprecated, bpf_loader_upgradeable, loader_v4},
     std::{
         cell::{Ref, RefCell},
         fmt,
@@ -24,7 +24,7 @@ use {
 #[cfg(feature = "bincode")]
 pub mod state_traits;
 
-pub mod shared;
+pub mod cow;
 
 /// An Account with data that is stored on chain
 #[repr(C)]
@@ -99,13 +99,28 @@ impl Serialize for Account {
     }
 }
 
+#[cfg(feature = "serde")]
+impl Serialize for AccountSharedData {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        crate::account_serialize::serialize_account(self, serializer)
+    }
+}
+
 /// An Account with data that is stored on chain
 /// This will be the in-memory representation of the 'Account' struct data.
 /// The existing 'Account' structure cannot easily change due to downstream projects.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde_derive::Deserialize),
+    serde(from = "Account")
+)]
 #[derive(PartialEq, Eq, Clone)]
 pub enum AccountSharedData {
-    Borrowed(AccountSharedDataBorrowed),
-    Owned(AccountSharedDataOwned),
+    Borrowed(AccountBorrowed),
+    Owned(AccountOwned),
 }
 /// Compares two ReadableAccounts
 ///
@@ -146,7 +161,7 @@ impl From<AccountSharedData> for Account {
 
 impl From<Account> for AccountSharedData {
     fn from(other: Account) -> Self {
-        Self::Owned(AccountSharedDataOwned {
+        Self::Owned(AccountOwned {
             lamports: other.lamports,
             data: Arc::new(other.data),
             owner: other.owner,
@@ -320,7 +335,7 @@ impl WritableAccount for AccountSharedData {
         executable: bool,
         rent_epoch: Epoch,
     ) -> Self {
-        Self::Owned(AccountSharedDataOwned {
+        Self::Owned(AccountOwned {
             lamports,
             data: Arc::new(data),
             owner,
@@ -804,6 +819,30 @@ impl solana_account_info::Account for Account {
         )
     }
 }
+#[cfg(feature = "bincode")]
+/// Serialize a `Sysvar` into an `Account`'s data.
+pub fn to_account<S: Sysvar, T: WritableAccount>(sysvar: &S, account: &mut T) -> Option<()> {
+    bincode::serialize_into(account.data_as_mut_slice(), sysvar).ok()
+}
+
+pub fn create_account_with_fields<S: Sysvar>(
+    sysvar: &S,
+    (lamports, rent_epoch): InheritableAccountFields,
+) -> Account {
+    let data_len = S::size_of().max(bincode::serialized_size(sysvar).unwrap() as usize);
+    let mut account = Account::new(lamports, data_len, &solana_sdk_ids::sysvar::id());
+    to_account::<S, Account>(sysvar, &mut account).unwrap();
+    account.rent_epoch = rent_epoch;
+    account
+}
+
+#[cfg(feature = "bincode")]
+pub fn create_account_shared_data_for_test<S: Sysvar>(sysvar: &S) -> AccountSharedData {
+    AccountSharedData::from(create_account_with_fields(
+        sysvar,
+        DUMMY_INHERITABLE_ACCOUNT_FIELDS,
+    ))
+}
 
 /// Create `AccountInfo`s
 pub fn create_is_signer_account_infos<'a>(
@@ -826,13 +865,13 @@ pub fn create_is_signer_account_infos<'a>(
         .collect()
 }
 
-/// Replacement for the executable flag: An account being owned by one of these contains a program.
-pub const PROGRAM_OWNERS: &[Pubkey] = &[
-    bpf_loader_upgradeable::id(),
-    bpf_loader::id(),
-    bpf_loader_deprecated::id(),
-    loader_v4::id(),
-];
+// // Replacement for the executable flag: An account being owned by one of these contains a program.
+//pub const PROGRAM_OWNERS: &[Pubkey] = &[
+//    bpf_loader_upgradeable::id(),
+//    bpf_loader::id(),
+//    bpf_loader_deprecated::id(),
+//    loader_v4::id(),
+//];
 
 #[cfg(test)]
 pub mod tests {
