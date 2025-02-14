@@ -160,6 +160,7 @@ impl BytesSerDe {
         value
     }
     /// read the actual Copy value from memory location and advance the cursor
+    #[inline(always)]
     unsafe fn read_val<T: Sized + Copy>(&mut self) -> T {
         let value = (self.ptr as *mut T).read();
         self.ptr = self.ptr.add(size_of::<T>());
@@ -171,6 +172,11 @@ impl BytesSerDe {
         let len = self.read_val::<u32>() as usize;
         let ptr = self.ptr;
         DataSlice { ptr, len }
+    }
+
+    #[inline(always)]
+    unsafe fn jump(&mut self, distance: usize) {
+        self.ptr = self.ptr.add(distance);
     }
 }
 
@@ -211,7 +217,6 @@ impl AccountSharedData {
     /// static fields (use [Self::serialized_size_aligned]) + 8 bytes of metadata
     pub unsafe fn serialize_to_mmap(acc: &AccountOwned, memptr: *mut u8) {
         let size = Self::serialized_size_aligned(acc.data.len()) as u32;
-        println!("size: {size}");
         let mut serializer = BytesSerDe::new(memptr);
         // write shadow buffer switch counter, we start with 0 for first buffer
         // and then keep incrementing it on each modification, with even values
@@ -271,7 +276,7 @@ impl AccountSharedData {
         // use data from second buffer for odd value (or keep reading from first otherwise)
         if is_odd {
             // jump to second buffer to start deserializing from there
-            deserializer = BytesSerDe::new(memptr.offset(shadow_offset));
+            deserializer.jump(shadow_offset as usize);
             // set shadow_offset to negative value, so
             // it will jump back to first buffer upon CoW
             shadow_offset = -shadow_offset;
@@ -403,6 +408,11 @@ mod tests {
         assert_eq!(borrowed.lamports(), LAMPORTS);
         unsafe { assert_eq!(*shadow_switch, 0) };
         borrowed.set_lamports(42);
+        assert_eq!(
+            unsafe { *AccountSharedData::deserialize_from_mmap(buffer.ptr).lamports },
+            LAMPORTS,
+            "lamports change should have been written to shadow buffer"
+        );
         assert_eq!(
             borrowed.lamports(),
             42,

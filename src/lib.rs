@@ -732,7 +732,20 @@ impl AccountSharedData {
 
     #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
     fn set_data(&mut self, data: Vec<u8>) {
-        self.ensure_owned();
+        if let Self::Borrowed(acc) = self {
+            if acc.data.len < data.len() {
+                self.ensure_owned();
+            } else {
+                unsafe {
+                    acc.cow();
+                    acc.data
+                        .ptr
+                        .copy_from_nonoverlapping(data.as_slice().as_ptr(), data.len());
+                }
+                acc.data.len = data.len();
+                return;
+            }
+        }
         let Self::Owned(acc) = self else {
             // ensure_owned transformed self to Owned, this branch will never be taken
             return;
