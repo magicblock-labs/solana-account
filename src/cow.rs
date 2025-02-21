@@ -32,6 +32,12 @@ pub struct AccountBorrowed {
     pub(crate) executable: bool, // we don't use pointer as this field is pretty much static once set (on chain)
 }
 
+impl From<AccountBorrowed> for AccountSharedData {
+    fn from(value: AccountBorrowed) -> Self {
+        Self::Borrowed(value)
+    }
+}
+
 unsafe impl Send for AccountBorrowed {}
 // NOTE!: this variant of AccountSharedData should not be write accessed from different threads
 // without some kind of synchronization like locks, otherwise it's a UB
@@ -148,10 +154,6 @@ impl BytesSerDe {
         self.ptr = self.ptr.add(slice.len());
     }
 
-    fn skip(&mut self, step: usize) {
-        self.ptr = unsafe { self.ptr.add(step) };
-    }
-
     /// return pointer to specified type and advance the cursor by the type's size
     #[inline(always)]
     unsafe fn read<T: Sized>(&mut self) -> *mut T {
@@ -249,10 +251,10 @@ impl AccountSharedData {
         let lamports = deserializer.read::<u64>();
         // read 32 bytes for owner
         let owner = deserializer.read::<Pubkey>();
-        // skip 3 bytes of padding before boolean flag
-        deserializer.skip(3);
-        // read a single byte for boolean executable flag
-        let executable = *deserializer.read::<bool>();
+        // read a boolean flags
+        let flags = *deserializer.read::<u32>();
+        // extract executable flag
+        let executable = flags & 1 == 1;
         // read the data slice
         let data = deserializer.read_slice();
         AccountBorrowed {
@@ -434,6 +436,34 @@ mod tests {
                 "shadow_switch should have been incrmented"
             )
         }
+    }
+
+    #[test]
+    fn test_switch_back() {
+        let (buffer, _, mut borrowed) = setup!();
+
+        let shadow_switch = buffer.ptr as *const u32;
+
+        unsafe { assert_eq!(*shadow_switch, 0) };
+        borrowed.set_lamports(42);
+        if let AccountSharedData::Borrowed(bacc) = borrowed {
+            bacc.commit();
+        }
+        borrowed = unsafe { AccountSharedData::deserialize_from_mmap(buffer.ptr).into() };
+        assert_eq!(borrowed.lamports(), 42);
+        unsafe { assert_eq!(*shadow_switch, 1) };
+        borrowed.set_lamports(43);
+        if let AccountSharedData::Borrowed(bacc) = borrowed {
+            assert_eq!(
+                bacc.lamports,
+                unsafe { buffer.ptr.offset(8) as *mut u64 },
+                "expected lamports pointer to be translated to shadow(first) buffer"
+            );
+            bacc.commit();
+        }
+        // shadow_switch should have been incremented
+        // and now points to first buffer again
+        unsafe { assert_eq!(*shadow_switch % 2, 0) };
     }
 
     #[test]

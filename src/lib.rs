@@ -6,7 +6,10 @@ use cow::{AccountBorrowed, AccountOwned};
 use qualifier_attr::qualifiers;
 #[cfg(feature = "serde")]
 use serde::ser::{Serialize, Serializer};
+use solana_sdk_ids::{bpf_loader, bpf_loader_deprecated, bpf_loader_upgradeable, loader_v4};
+#[cfg(feature = "bincode")]
 use solana_sysvar::Sysvar;
+
 use {
     solana_account_info::{debug_account_data::*, AccountInfo},
     solana_clock::{Epoch, INITIAL_RENT_EPOCH},
@@ -833,9 +836,24 @@ impl solana_account_info::Account for Account {
     }
 }
 #[cfg(feature = "bincode")]
-/// Serialize a `Sysvar` into an `Account`'s data.
+// Serialize a `Sysvar` into an `Account`'s data.
 pub fn to_account<S: Sysvar, T: WritableAccount>(sysvar: &S, account: &mut T) -> Option<()> {
     bincode::serialize_into(account.data_as_mut_slice(), sysvar).ok()
+}
+
+#[cfg(feature = "bincode")]
+/// Create an `Account` from a `Sysvar`.
+pub fn create_account_shared_data_with_fields<S: Sysvar>(
+    sysvar: &S,
+    fields: InheritableAccountFields,
+) -> AccountSharedData {
+    AccountSharedData::from(create_account_with_fields(sysvar, fields))
+}
+
+#[cfg(feature = "bincode")]
+/// Create a `Sysvar` from an `Account`'s data.
+pub fn from_account<S: Sysvar, T: ReadableAccount>(account: &T) -> Option<S> {
+    bincode::deserialize(account.data()).ok()
 }
 
 pub fn create_account_with_fields<S: Sysvar>(
@@ -843,7 +861,8 @@ pub fn create_account_with_fields<S: Sysvar>(
     (lamports, rent_epoch): InheritableAccountFields,
 ) -> Account {
     let data_len = S::size_of().max(bincode::serialized_size(sysvar).unwrap() as usize);
-    let mut account = Account::new(lamports, data_len, &solana_sdk_ids::sysvar::id());
+    let sysvar_id = Pubkey::from_str_const("Sysvar1111111111111111111111111111111111111");
+    let mut account = Account::new(lamports, data_len, &sysvar_id);
     to_account::<S, Account>(sysvar, &mut account).unwrap();
     account.rent_epoch = rent_epoch;
     account
@@ -879,12 +898,12 @@ pub fn create_is_signer_account_infos<'a>(
 }
 
 // // Replacement for the executable flag: An account being owned by one of these contains a program.
-//pub const PROGRAM_OWNERS: &[Pubkey] = &[
-//    bpf_loader_upgradeable::id(),
-//    bpf_loader::id(),
-//    bpf_loader_deprecated::id(),
-//    loader_v4::id(),
-//];
+pub const PROGRAM_OWNERS: &[Pubkey] = &[
+    bpf_loader_upgradeable::id(),
+    bpf_loader::id(),
+    bpf_loader_deprecated::id(),
+    loader_v4::id(),
+];
 
 #[cfg(test)]
 pub mod tests {
