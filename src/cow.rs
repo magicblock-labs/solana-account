@@ -55,11 +55,11 @@ impl AccountBorrowed {
         if self.shadow_offset == 0 {
             return;
         }
-
         // bulk copy the modifiable section to shadow buffer
         // we start with lamports address and copy the entire current buffer over
         let src = self.lamports as *mut u8;
         let dst = src.offset(self.shadow_offset);
+
         dst.copy_from_nonoverlapping(src, self.shadow_offset.unsigned_abs());
 
         // translate the pointers after copying the data over to shadow buffer
@@ -76,6 +76,11 @@ impl AccountBorrowed {
     /// make current shadow buffer active by advancing the counter
     #[inline(always)]
     pub fn commit(&self) {
+        // if cow didn't take place, then we never
+        // touched this account, leave it be
+        if self.shadow_offset != 0 {
+            return;
+        }
         self.shadow_switch.increment();
     }
 
@@ -231,10 +236,10 @@ impl AccountSharedData {
         serializer.write(acc.lamports);
         // write 32 bytes for owner
         serializer.write(acc.owner);
-        // write executable 32 bytes (for alignment purposes), also
+        // write executable 32 bits (for alignment purposes), also
         // upper 31 bits can bit used for various future extensions
         serializer.write(acc.executable as u32);
-        // finally write data binary data
+        // finally write binary data
         serializer.write_slice(&acc.data);
     }
 
@@ -252,7 +257,7 @@ impl AccountSharedData {
         // read 32 bytes for owner
         let owner = deserializer.read::<Pubkey>();
         // read a boolean flags
-        let flags = *deserializer.read::<u32>();
+        let flags = deserializer.read_val::<u32>();
         // extract executable flag
         let executable = flags & 1 == 1;
         // read the data slice

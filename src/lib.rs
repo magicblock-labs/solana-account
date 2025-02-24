@@ -653,7 +653,10 @@ impl AccountSharedData {
     fn data_mut(&mut self) -> &mut [u8] {
         match self {
             Self::Owned(acc) => Arc::make_mut(&mut acc.data).as_mut_slice(),
-            Self::Borrowed(acc) => &mut acc.data,
+            Self::Borrowed(acc) => {
+                unsafe { acc.cow() };
+                &mut acc.data
+            }
         }
     }
 
@@ -759,7 +762,7 @@ impl AccountSharedData {
     pub fn spare_data_capacity_mut(&mut self) -> &mut [MaybeUninit<u8>] {
         match self {
             Self::Borrowed(acc) => {
-                // we don't really have any further capacity
+                // we don't really have any extra capacity
                 let ptr = acc.data.ptr as *mut MaybeUninit<u8>;
                 unsafe { std::slice::from_raw_parts_mut(ptr, 0) }
             }
