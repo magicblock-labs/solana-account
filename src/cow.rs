@@ -347,6 +347,17 @@ impl DataSlice {
     fn translate(&mut self, offset: isize) {
         self.ptr = unsafe { self.ptr.offset(offset) }
     }
+
+    // # Safety
+    // the caller must ensure that backing store does indeed have enough capacity
+    // indicated by len and that the data before ..len is initialized
+    pub(crate) unsafe fn set_len(&mut self, len: usize) {
+        // we didn't grow, which means we shrunk, truncate the data
+        self.len = len;
+        // dirty hack: len u32 is guaranteed to be located 4 bytes before the
+        // data pointer, we jump back to it and modify
+        (self.ptr.offset(-4) as *mut u32).write(len as u32);
+    }
 }
 
 #[cfg(test)]
@@ -493,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn test_setting_date_from_slice() {
+    fn test_setting_data_from_slice() {
         let (_, _, mut borrowed) = setup!();
         let len = borrowed.data().len();
         let msg = b"hello world?";
@@ -509,9 +520,37 @@ mod tests {
             msg.len(),
             "account data len should be equal to that of slice"
         );
-        assert!(
-            matches!(borrowed, AccountSharedData::Borrowed(_)),
-            "Borrowed account should not have been upgraded to Owned when slice length is less than the original"
+        let AccountSharedData::Borrowed(borrowed) = borrowed else {
+            panic!("Borrowed account should not have been upgraded to Owned when slice length is less than the original");
+        };
+        assert_eq!(
+            unsafe { *(borrowed.data.ptr.offset(-4) as *mut u32) } as usize,
+            msg.len(),
+            "data must have been shrunk"
+        );
+    }
+
+    #[test]
+    fn test_account_shrinking() {
+        let (_, _, mut borrowed) = setup!();
+        borrowed.resize(0, 0);
+        assert_eq!(
+            borrowed.data(),
+            b"",
+            "account data should have been truncated"
+        );
+        assert_eq!(
+            borrowed.data().len(),
+            0,
+            "account data should have been truncated"
+        );
+        let AccountSharedData::Borrowed(borrowed) = borrowed else {
+            panic!("Borrowed account should not have been upgraded to Owned when slice length is less than the original");
+        };
+        assert_eq!(
+            unsafe { *(borrowed.data.ptr.offset(-4) as *mut u32) },
+            0,
+            "data must have been truncated"
         );
     }
 }

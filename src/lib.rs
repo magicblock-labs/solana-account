@@ -668,10 +668,10 @@ impl AccountSharedData {
             Self::Owned(acc) => Arc::make_mut(&mut acc.data).resize(new_len, value),
             Self::Borrowed(acc) => {
                 // we didn't grow, which means we shrunk, truncate the data
-                acc.data.len = new_len;
-                // dirty hack: len u32 is guaranteed to be located 4 bytes before the
-                // data pointer, we jump back to it and modify
-                unsafe { (acc.data.ptr.offset(-4) as *mut u32).write(new_len as u32) };
+                //
+                // Safety: we made sure that new_len doesn't exceed
+                // the old one and old data is already initialized
+                unsafe { acc.data.set_len(new_len) };
             }
         }
     }
@@ -695,7 +695,9 @@ impl AccountSharedData {
                     acc.cow();
                     acc.data.ptr.copy_from_nonoverlapping(new_ptr, new_len);
                 }
-                acc.data.len = new_len;
+                // Safety: we just initialized the data and made sure that
+                // new_len doesn't exceed the old one
+                unsafe { acc.data.set_len(new_len) };
                 return;
             }
             Self::Owned(acc) => acc,
@@ -748,7 +750,9 @@ impl AccountSharedData {
                         .ptr
                         .copy_from_nonoverlapping(data.as_slice().as_ptr(), data.len());
                 }
-                acc.data.len = data.len();
+                // Safety: we just initialized the data and made sure that
+                // new_len doesn't exceed the old one
+                unsafe { acc.data.set_len(data.len()) };
                 return;
             }
         }
