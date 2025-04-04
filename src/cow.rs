@@ -1,4 +1,5 @@
 use std::{
+    mem::{align_of, size_of},
     ops::{Deref, DerefMut},
     sync::{
         atomic::{AtomicU32, Ordering},

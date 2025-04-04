@@ -18,6 +18,7 @@ use {
     std::{
         cell::{Ref, RefCell},
         fmt,
+        mem::size_of,
         mem::MaybeUninit,
         ptr,
         rc::Rc,
