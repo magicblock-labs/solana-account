@@ -12,6 +12,12 @@ use solana_pubkey::Pubkey;
 
 use crate::AccountSharedData;
 
+/// Offset (in bytes) from data field pointer where len field can be located
+const DATA_LENGTH_POINTER_OFFSET: isize = -4;
+
+pub(crate) const EXECUTABLE_FLAG_INDEX: u32 = 0;
+pub(crate) const IS_DELEGATED_FLAG_INDEX: u32 = 1;
+
 /// Memory optimized version of account shared data, which internally uses raw pointers to
 /// manipulate database (memory mapped) directly. If the account is modified, the modification
 /// triggers Copy on Write and all the changes are written to shadow buffer which can be discarded
@@ -29,12 +35,16 @@ pub struct AccountBorrowed {
     pub(crate) data: DataSlice,
     /// the program that owns this account. If executable, the program that loads this account.
     pub(crate) owner: *mut Pubkey,
-    /// this account's data contains a loaded program (and is now read-only)
-    /// NOTE: we don't use pointer as this field is pretty much static once set (on chain)
-    pub(crate) executable: bool,
     /// a boolean flag to track whether account has changed its owner
     pub owner_changed: bool,
+    /// various bitpacked flags
+    /// 0. whether the account is executable
+    /// 1. whether the account is delegated
+    pub(crate) flags: BitFlags,
 }
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct BitFlags(*mut u32);
 
 impl From<AccountBorrowed> for AccountSharedData {
     fn from(value: AccountBorrowed) -> Self {
@@ -126,6 +136,8 @@ pub struct AccountOwned {
     pub(crate) executable: bool,
     /// the epoch at which this account will next owe rent
     pub(crate) rent_epoch: Epoch,
+    /// a boolean flag to track whether account has been delegated to the host ER node
+    pub(crate) is_delegated: bool,
 }
 
 impl Default for AccountSharedData {
@@ -278,9 +290,12 @@ impl AccountSharedData {
         serializer.write(acc.lamports);
         // write 32 bytes for owner
         serializer.write(acc.owner);
-        // write executable 32 bits (for alignment purposes), also
-        // upper 31 bits can bit used for various future extensions
-        serializer.write(acc.executable as u32);
+        // write various flags into next 32 bits (for alignment purposes),
+        // bit 0 is "executable" flag
+        // bit 1 is "is_delegated" flag
+        // also the remaining upper 30 bits can bit used for various future extensions
+        let flags = acc.executable as u32 | ((acc.is_delegated as u32) << 1);
+        serializer.write(flags);
         // write the capacity allocated for the data field
         serializer.write(capacity.saturating_sub(Self::ACCOUNT_STATIC_SIZE));
         // finally write binary data
@@ -300,20 +315,18 @@ impl AccountSharedData {
         let lamports = deserializer.read::<u64>();
         // read 32 bytes for owner
         let owner = deserializer.read::<Pubkey>();
-        // read a boolean flags
-        let flags = deserializer.read_val::<u32>();
-        // extract executable flag
-        let executable = flags & 1 == 1;
+        // read the boolean flags
+        let flags = deserializer.read::<u32>();
         // read the data slice
         let data = deserializer.read_slice();
         AccountBorrowed {
             lamports,
             owner,
             data,
-            executable,
             shadow_offset,
             shadow_switch,
             owner_changed: false,
+            flags: BitFlags(flags),
         }
     }
 
@@ -337,6 +350,30 @@ impl AccountSharedData {
             deserializer,
             shadow_offset,
             shadow_switch,
+        }
+    }
+
+    /// Whether the given account is delegated or not
+    pub fn is_delegated(&self) -> bool {
+        match self {
+            Self::Borrowed(acc) => acc.flags.is_set(IS_DELEGATED_FLAG_INDEX),
+            Self::Owned(acc) => acc.is_delegated,
+        }
+    }
+}
+
+impl BitFlags {
+    pub(crate) fn is_set(&self, index: u32) -> bool {
+        (unsafe { *self.0 } >> index) == 1
+    }
+
+    pub(crate) fn set(&self, val: bool, index: u32) {
+        unsafe {
+            if val {
+                *self.0 |= 1 << index;
+            } else {
+                *self.0 &= !(1 << index);
+            }
         }
     }
 }
@@ -401,7 +438,7 @@ impl DataSlice {
         self.len = len as u32;
         // dirty hack: len u32 is guaranteed to be located 4 bytes before the
         // data pointer, we jump back to it and modify
-        (self.ptr.offset(-4) as *mut u32).write(len as u32);
+        (self.ptr.offset(DATA_LENGTH_POINTER_OFFSET) as *mut u32).write(len as u32);
     }
 }
 
@@ -665,6 +702,29 @@ mod tests {
         assert!(
             borrowed.owner_changed,
             "owner_changed flag must have been set"
+        );
+    }
+
+    #[test]
+    fn test_bitflags() {
+        let (_, _, mut borrowed) = setup!();
+        assert!(
+            !borrowed.is_delegated(),
+            "account should not be delegated by default"
+        );
+        assert!(
+            !borrowed.executable(),
+            "account should not be executable by default"
+        );
+        borrowed.set_executable(true);
+        assert!(
+            borrowed.executable(),
+            "account should have become executable after change"
+        );
+        borrowed.set_delegated(true);
+        assert!(
+            borrowed.is_delegated(),
+            "account should have become delegated after change"
         );
     }
 }
