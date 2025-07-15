@@ -631,7 +631,13 @@ impl AccountSharedData {
     }
 
     pub fn reserve(&mut self, additional: usize) {
-        self.ensure_owned();
+        if let Self::Borrowed(acc) = self {
+            if (acc.data.cap as usize) < (acc.data.len as usize + additional) {
+                self.ensure_owned();
+            } else {
+                return;
+            }
+        }
         if let Self::Owned(acc) = self {
             if let Some(data) = Arc::get_mut(&mut acc.data) {
                 data.reserve(additional)
@@ -646,7 +652,7 @@ impl AccountSharedData {
     pub fn capacity(&self) -> usize {
         match self {
             Self::Owned(acc) => acc.data.capacity(),
-            Self::Borrowed(_) => 0,
+            Self::Borrowed(acc) => acc.data.cap as usize,
         }
     }
 
@@ -662,7 +668,7 @@ impl AccountSharedData {
     }
 
     pub fn resize(&mut self, new_len: usize, value: u8) {
-        if new_len > self.data().len() {
+        if new_len > self.capacity() {
             self.ensure_owned();
         }
         match self {
@@ -687,18 +693,19 @@ impl AccountSharedData {
     pub fn set_data_from_slice(&mut self, new_data: &[u8]) {
         let new_len = new_data.len();
         let new_ptr = new_data.as_ptr();
-        if new_len > self.data().len() {
+        if new_len > self.capacity() {
             self.ensure_owned();
         }
         let acc = match self {
             Self::Borrowed(acc) => {
+                // SAFETY:
+                // we just initialized the data and made sure that
+                // new_len doesn't exceed the available capacity
                 unsafe {
                     acc.cow();
                     acc.data.ptr.copy_from_nonoverlapping(new_ptr, new_len);
+                    acc.data.set_len(new_len);
                 }
-                // Safety: we just initialized the data and made sure that
-                // new_len doesn't exceed the old one
-                unsafe { acc.data.set_len(new_len) };
                 return;
             }
             Self::Owned(acc) => acc,
@@ -730,8 +737,6 @@ impl AccountSharedData {
         // We just reserved enough capacity. We set data::len to 0 to avoid
         // possible UB on panic (dropping uninitialized elements), do the copy,
         // finally set the new length once everything is initialized.
-        #[allow(clippy::uninit_vec)]
-        // this is a false positive, the lint doesn't currently special case set_len(0)
         unsafe {
             data.set_len(0);
             ptr::copy_nonoverlapping(new_ptr, data.as_mut_ptr(), new_len);
@@ -741,21 +746,21 @@ impl AccountSharedData {
 
     #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
     fn set_data(&mut self, data: Vec<u8>) {
+        if self.capacity() < data.len() {
+            self.ensure_owned();
+        }
         if let Self::Borrowed(acc) = self {
-            if acc.data.len < data.len() {
-                self.ensure_owned();
-            } else {
-                unsafe {
-                    acc.cow();
-                    acc.data
-                        .ptr
-                        .copy_from_nonoverlapping(data.as_slice().as_ptr(), data.len());
-                }
-                // Safety: we just initialized the data and made sure that
-                // new_len doesn't exceed the old one
-                unsafe { acc.data.set_len(data.len()) };
-                return;
+            // SAFETY:
+            // we are initializing the data and we made sure that
+            // data.len() doesn't exceed the available capacity
+            unsafe {
+                acc.cow();
+                acc.data
+                    .ptr
+                    .copy_from_nonoverlapping(data.as_slice().as_ptr(), data.len());
+                acc.data.set_len(data.len());
             }
+            return;
         }
         let Self::Owned(acc) = self else {
             // ensure_owned transformed self to Owned, this branch will never be taken
@@ -766,11 +771,13 @@ impl AccountSharedData {
 
     pub fn spare_data_capacity_mut(&mut self) -> &mut [MaybeUninit<u8>] {
         match self {
-            Self::Borrowed(acc) => {
-                // we don't really have any extra capacity
-                let ptr = acc.data.ptr as *mut MaybeUninit<u8>;
-                unsafe { std::slice::from_raw_parts_mut(ptr, 0) }
-            }
+            Self::Borrowed(acc) => unsafe {
+                let ptr = acc.data.ptr.add(acc.data.len as usize) as *mut MaybeUninit<u8>;
+                std::slice::from_raw_parts_mut(
+                    ptr,
+                    acc.data.cap.saturating_sub(acc.data.len) as usize,
+                )
+            },
             Self::Owned(acc) => Arc::make_mut(&mut acc.data).spare_capacity_mut(),
         }
     }
@@ -778,9 +785,11 @@ impl AccountSharedData {
     pub fn new(lamports: u64, space: usize, owner: &Pubkey) -> Self {
         shared_new(lamports, space, owner)
     }
+
     pub fn new_ref(lamports: u64, space: usize, owner: &Pubkey) -> Rc<RefCell<Self>> {
         shared_new_ref(lamports, space, owner)
     }
+
     #[cfg(feature = "bincode")]
     pub fn new_data<T: serde::Serialize>(
         lamports: u64,
@@ -789,6 +798,7 @@ impl AccountSharedData {
     ) -> Result<Self, bincode::Error> {
         shared_new_data(lamports, state, owner)
     }
+
     #[cfg(feature = "bincode")]
     pub fn new_ref_data<T: serde::Serialize>(
         lamports: u64,

@@ -1,6 +1,6 @@
 use std::{
     mem::{align_of, size_of},
-    ops::{Deref, DerefMut},
+    ops::{Deref, DerefMut, Div, Mul},
     sync::{
         atomic::{AtomicU32, Ordering},
         Arc,
@@ -177,9 +177,10 @@ impl BytesSerDe {
     /// read length of slice followed by slice pointer itself, advance the cursor
     #[inline(always)]
     unsafe fn read_slice(&mut self) -> DataSlice {
-        let len = self.read_val::<u32>() as usize;
+        let cap = self.read_val::<u32>();
+        let len = self.read_val::<u32>();
         let ptr = self.ptr;
-        DataSlice { ptr, len }
+        DataSlice { ptr, len, cap }
     }
 
     #[inline(always)]
@@ -188,51 +189,88 @@ impl BytesSerDe {
     }
 }
 
-// Implementation related to custom memory mapped AccountsDB
-/// Account Record Layout
-/// 1. | shadow switch counter: 4 |
-/// 2. | shadow offset: 4         |
-/// 3. | lamports: 8              |
-/// 4. | owner: 32                |
-/// 5. | executable: 4            |
-/// 6. | datalen: 4               |
-/// 7. | data: var                |
-/// 8. | 8 byte align padding     |
-/// 9. | shadow copy of 3-7       |
+/// # Account Record Layout
+///
+/// The account record is stored in memory-mapped format with the following structure:
+/// ```text
+/// +-----------------------------------------------------------------------------------------+
+/// | Field                   | Size (bytes) | Offset | Description                           |
+/// |-------------------------|--------------|--------|---------------------------------------|
+/// | 1. Shadow Switch        | 4            | 0      | Counter for shadow copy switching     |
+/// | 2. Shadow Offset        | 4            | 4      | Offset to shadow copy location        |
+/// | 3. Lamports             | 8            | 8      | Account balance in lamports           |
+/// | 4. Owner                | 32           | 16     | Public key of the account owner       |
+/// | 5. Executable           | 4            | 48     | Whether  account is executable        |
+/// | 6. Data Capacity        | 4            | 52     | Maximum capacity of account data      |
+/// | 7. Data Length          | 4            | 56     | Current length of account data        |
+/// | 8. Data                 | Variable     | 60     | Account data payload                  |
+/// | 9. Slack space          | Variable     | -      | 8-byte aligned extra capacity         |
+/// | 10. Shadow Copy         | Variable     | -      | Shadow copy of fields 3-8             |
+/// +-----------------------------------------------------------------------------------------+
+/// ```
 impl AccountSharedData {
-    pub const SERIALIZED_META_SIZE: usize = size_of::<u64>();
-    const SERIALIZATION_ALIGNMENT: usize = align_of::<u64>();
-    const ACCOUNT_STATIC_SIZE: usize =
+    const SERIALIZED_META_SIZE: u32 = size_of::<u64>() as u32;
+    const SERIALIZATION_ALIGNMENT: u32 = align_of::<u64>() as u32;
+    const ACCOUNT_STATIC_SIZE: u32 =
         // lamports
-        size_of::<u64>() +
+        (size_of::<u64>() +
         // owner
         size_of::<Pubkey>() +
+        // data capacity
+        size_of::<u32>() +
         // data length
         size_of::<u32>() +
         // executable and other flags
-        size_of::<u32>();
+        size_of::<u32>()) as u32;
 
-    /// Get the size of serialization with extra padding to reach SERIALIZATION_ALIGNMENT
-    pub fn serialized_size_aligned(data_len: usize) -> usize {
-        let size = Self::ACCOUNT_STATIC_SIZE + data_len;
-        let extra = size % Self::SERIALIZATION_ALIGNMENT;
-        size + (Self::SERIALIZATION_ALIGNMENT - extra) * (extra != 0) as usize
+    /// Get the size of serialization of account along with shadow
+    /// buffer which is aligned to the provided `alignment` value
+    pub const fn serialized_size_aligned(data_len: u32, alignment: u32) -> u32 {
+        // Helper function for alignment
+        const fn align_up(size: u32, align: u32) -> u32 {
+            size.div_ceil(align) * align
+        }
+        // Step 1: Calculate base size
+        let base_size = Self::ACCOUNT_STATIC_SIZE + data_len;
+
+        // Step 2: Align up to SERIALIZATION_ALIGNMENT and double it (for shadow buffer)
+        let aligned = align_up(base_size, Self::SERIALIZATION_ALIGNMENT) * 2;
+
+        // Step 3: Add meta size
+        let with_meta = aligned + Self::SERIALIZED_META_SIZE;
+
+        // Step 4: Align up to requested alignment
+        align_up(with_meta, alignment)
+    }
+    /// Calculate optimal size which uses as much of the available
+    /// space as possible, while maintaining the 8 byte alignment
+    #[inline]
+    fn calculate_capacity(capacity: u32) -> u32 {
+        capacity
+            .saturating_sub(Self::SERIALIZED_META_SIZE)
+            .div(2)
+            .div(Self::SERIALIZATION_ALIGNMENT)
+            .mul(Self::SERIALIZATION_ALIGNMENT)
     }
 
     /// # Safety
-    /// memptr should point to valid and exclusively owned memory region, memory should be
-    /// properly aligned to 8 bytes, memory should have enough capacity to fit account' data and
-    /// static fields (use [Self::serialized_size_aligned]) + 8 bytes of metadata
-    pub unsafe fn serialize_to_mmap(acc: &AccountOwned, memptr: *mut u8) {
-        let size = Self::serialized_size_aligned(acc.data.len()) as u32;
+    /// memptr should point to valid and exclusively owned memory region, memory should be properly
+    /// aligned to 8 bytes, memory should have enough capacity to fit account' data and static
+    /// fields (use [Self::serialized_size_aligned]) + 8 bytes of metadata, capacity must be
+    /// constructed through a call to the [Self::serialized_size_aligned], otherwise it might result
+    /// in UB caused by misaligned layout of data
+    pub unsafe fn serialize_to_mmap(acc: &AccountOwned, memptr: *mut u8, mut capacity: u32) {
+        // figure out optimal aligned capacity
+        capacity = Self::calculate_capacity(capacity);
+
         let mut serializer = BytesSerDe::new(memptr);
-        // write shadow buffer switch counter, we start with 0 for first buffer
+        // write shadow buffer switch counter, we start with 0 for the first buffer
         // and then keep incrementing it on each modification, with even values
         // indicating first buffer and odd values indicating adjacent second one
-        serializer.write(0_u32);
+        serializer.write(0u32);
         // write shadow offset, it is equal to the
         // size of serialized data (with padding)
-        serializer.write(size);
+        serializer.write(capacity);
         // write 8 bytes for lamports
         serializer.write(acc.lamports);
         // write 32 bytes for owner
@@ -240,6 +278,8 @@ impl AccountSharedData {
         // write executable 32 bits (for alignment purposes), also
         // upper 31 bits can bit used for various future extensions
         serializer.write(acc.executable as u32);
+        // write the capacity allocated for the data field
+        serializer.write(capacity.saturating_sub(Self::ACCOUNT_STATIC_SIZE));
         // finally write binary data
         serializer.write_slice(&acc.data);
     }
@@ -328,19 +368,20 @@ impl ShadowSwitch {
 #[derive(Clone, PartialEq, Eq)]
 pub struct DataSlice {
     pub(crate) ptr: *mut u8,
-    pub(crate) len: usize,
+    pub(crate) len: u32,
+    pub(crate) cap: u32,
 }
 
 impl Deref for DataSlice {
     type Target = [u8];
     fn deref(&self) -> &Self::Target {
-        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len as usize) }
     }
 }
 
 impl DerefMut for DataSlice {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len as usize) }
     }
 }
 
@@ -353,8 +394,7 @@ impl DataSlice {
     // the caller must ensure that backing store does indeed have enough capacity
     // indicated by len and that the data before ..len is initialized
     pub(crate) unsafe fn set_len(&mut self, len: usize) {
-        // we didn't grow, which means we shrunk, truncate the data
-        self.len = len;
+        self.len = len as u32;
         // dirty hack: len u32 is guaranteed to be located 4 bytes before the
         // data pointer, we jump back to it and modify
         (self.ptr.offset(-4) as *mut u32).write(len as u32);
@@ -366,7 +406,7 @@ mod tests {
     use super::*;
     use std::alloc::Layout;
 
-    const BUFFER_SIZE: usize = 225252;
+    const BUFFER_SIZE: u32 = AccountSharedData::serialized_size_aligned(16384, 256);
     const LAMPORTS: u64 = 2342525;
     const SPACE: usize = 2525;
     const OWNER: Pubkey = Pubkey::new_from_array([5; 32]);
@@ -378,7 +418,7 @@ mod tests {
 
     impl BufferArea {
         fn new() -> Self {
-            let layout = Layout::from_size_align(BUFFER_SIZE, 256).unwrap();
+            let layout = Layout::from_size_align(BUFFER_SIZE as usize, 256).unwrap();
             let ptr = unsafe { std::alloc::alloc(layout) };
             Self { ptr, layout }
         }
@@ -398,7 +438,7 @@ mod tests {
             let AccountSharedData::Owned(ref acc) = owned else {
                 panic!("invalid AccountSharedData initialization");
             };
-            unsafe { AccountSharedData::serialize_to_mmap(acc, buffer.ptr) };
+            unsafe { AccountSharedData::serialize_to_mmap(acc, buffer.ptr, BUFFER_SIZE) };
             let borrowed = unsafe { AccountSharedData::deserialize_from_mmap(buffer.ptr) };
             let borrowed = AccountSharedData::Borrowed(borrowed);
             (buffer, owned, borrowed)
@@ -408,6 +448,18 @@ mod tests {
     fn account() -> AccountSharedData {
         AccountSharedData::new_rent_epoch(LAMPORTS, SPACE, &OWNER, Epoch::MAX)
     }
+
+    #[test]
+    fn test_serialized_size() {
+        for align in [128, 256, 512] {
+            for s in 128..16384 {
+                let size = AccountSharedData::serialized_size_aligned(s, align);
+                assert_eq!(size % AccountSharedData::SERIALIZATION_ALIGNMENT, 0);
+                assert!(size >= s * 2 + AccountSharedData::SERIALIZED_META_SIZE);
+            }
+        }
+    }
+
     #[test]
     fn test_serde() {
         let (_, owned, borrowed) = setup!();
@@ -422,7 +474,7 @@ mod tests {
         let (buffer, _, mut borrowed) = setup!();
 
         let shadow_switch = buffer.ptr as *const u32;
-        let offset = AccountSharedData::serialized_size_aligned(borrowed.data().len()) as isize;
+        let offset = AccountSharedData::calculate_capacity(BUFFER_SIZE) as isize;
 
         assert_eq!(borrowed.lamports(), LAMPORTS);
         unsafe { assert_eq!(*shadow_switch, 0) };
@@ -552,6 +604,45 @@ mod tests {
             unsafe { *(borrowed.data.ptr.offset(-4) as *mut u32) },
             0,
             "data must have been truncated"
+        );
+        assert_eq!(
+            unsafe { *(borrowed.data.ptr.offset(-8) as *mut u32) },
+            AccountSharedData::calculate_capacity(BUFFER_SIZE)
+                - AccountSharedData::ACCOUNT_STATIC_SIZE,
+            "data capacity should not have been overwritten"
+        );
+    }
+
+    #[test]
+    fn test_account_growth() {
+        let (_, _, mut borrowed) = setup!();
+        borrowed.resize(SPACE * 2, 0);
+        assert_eq!(
+            borrowed.data().len(),
+            SPACE * 2,
+            "account data should have grown"
+        );
+        if let AccountSharedData::Borrowed(ref borrowed) = borrowed {
+            assert_eq!(
+                unsafe { *(borrowed.data.ptr.offset(-4) as *mut u32) },
+                SPACE as u32 * 2,
+                "data must have been double in size"
+            );
+            assert_eq!(
+                unsafe { *(borrowed.data.ptr.offset(-8) as *mut u32) },
+                AccountSharedData::calculate_capacity(BUFFER_SIZE)
+                    - AccountSharedData::ACCOUNT_STATIC_SIZE,
+                "data capacity should not have been overwritten"
+            );
+        };
+        borrowed.resize(BUFFER_SIZE as usize, 0);
+        let AccountSharedData::Owned(ref owned) = borrowed else {
+            panic!("borrowed account should have been converted to owned after large resize")
+        };
+        assert_eq!(
+            owned.data.len(),
+            BUFFER_SIZE as usize,
+            "data must have been resized to BUFFER_SIZE"
         );
     }
 }
