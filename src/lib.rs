@@ -1,7 +1,7 @@
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 //! The Solana [`Account`] type.
 
-use cow::{AccountBorrowed, AccountOwned};
+use cow::{AccountBorrowed, AccountOwned, EXECUTABLE_FLAG_INDEX, IS_DELEGATED_FLAG_INDEX};
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
 #[cfg(feature = "serde")]
@@ -145,7 +145,7 @@ impl From<AccountSharedData> for Account {
                     lamports: *acc.lamports,
                     data: acc.data.to_vec(),
                     owner: *acc.owner,
-                    executable: acc.executable,
+                    executable: acc.flags.is_set(EXECUTABLE_FLAG_INDEX),
                     rent_epoch: Epoch::MAX,
                 }
             },
@@ -167,6 +167,7 @@ impl From<Account> for AccountSharedData {
     fn from(other: Account) -> Self {
         Self::Owned(AccountOwned {
             lamports: other.lamports,
+            is_delegated: false,
             data: Arc::new(other.data),
             owner: other.owner,
             executable: other.executable,
@@ -320,9 +321,7 @@ impl WritableAccount for AccountSharedData {
     fn set_executable(&mut self, executable: bool) {
         match self {
             Self::Borrowed(acc) => {
-                // this is basically a noop, as it's impossible to
-                // change executableness for borrowend account
-                acc.executable = executable
+                acc.flags.set(executable, EXECUTABLE_FLAG_INDEX);
             }
             Self::Owned(acc) => acc.executable = executable,
         }
@@ -346,6 +345,7 @@ impl WritableAccount for AccountSharedData {
             owner,
             executable,
             rent_epoch,
+            is_delegated: false,
         })
     }
 }
@@ -371,7 +371,7 @@ impl ReadableAccount for AccountSharedData {
     }
     fn executable(&self) -> bool {
         match self {
-            Self::Borrowed(acc) => acc.executable,
+            Self::Borrowed(acc) => acc.flags.is_set(EXECUTABLE_FLAG_INDEX),
             Self::Owned(acc) => acc.executable,
         }
     }
@@ -619,15 +619,26 @@ impl AccountSharedData {
 
     fn ensure_owned(&mut self) {
         if let Self::Borrowed(acc) = self {
+            let is_delegated = acc.flags.is_set(IS_DELEGATED_FLAG_INDEX);
             *self = unsafe {
-                Self::create(
-                    *acc.lamports,
-                    (*acc.data).to_vec(),
-                    *acc.owner,
-                    acc.executable,
-                    Epoch::MAX,
-                )
-            };
+                Self::Owned(AccountOwned {
+                    lamports: *acc.lamports,
+                    data: Arc::new((*acc.data).to_vec()),
+                    owner: *acc.owner,
+                    executable: acc.flags.is_set(EXECUTABLE_FLAG_INDEX),
+                    rent_epoch: Epoch::MAX,
+                    is_delegated,
+                })
+            }
+        }
+    }
+
+    pub fn set_delegated(&mut self, is_delegated: bool) {
+        match self {
+            Self::Owned(acc) => acc.is_delegated = is_delegated,
+            Self::Borrowed(acc) => {
+                acc.flags.set(is_delegated, IS_DELEGATED_FLAG_INDEX);
+            }
         }
     }
 
