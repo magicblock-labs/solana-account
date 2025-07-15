@@ -30,7 +30,10 @@ pub struct AccountBorrowed {
     /// the program that owns this account. If executable, the program that loads this account.
     pub(crate) owner: *mut Pubkey,
     /// this account's data contains a loaded program (and is now read-only)
-    pub(crate) executable: bool, // we don't use pointer as this field is pretty much static once set (on chain)
+    /// NOTE: we don't use pointer as this field is pretty much static once set (on chain)
+    pub(crate) executable: bool,
+    /// a boolean flag to track whether account has changed its owner
+    pub owner_changed: bool,
 }
 
 impl From<AccountBorrowed> for AccountSharedData {
@@ -310,6 +313,7 @@ impl AccountSharedData {
             executable,
             shadow_offset,
             shadow_switch,
+            owner_changed: false,
         }
     }
 
@@ -626,7 +630,7 @@ mod tests {
             assert_eq!(
                 unsafe { *(borrowed.data.ptr.offset(-4) as *mut u32) },
                 SPACE as u32 * 2,
-                "data must have been double in size"
+                "data must have been doubled in size"
             );
             assert_eq!(
                 unsafe { *(borrowed.data.ptr.offset(-8) as *mut u32) },
@@ -643,6 +647,24 @@ mod tests {
             owned.data.len(),
             BUFFER_SIZE as usize,
             "data must have been resized to BUFFER_SIZE"
+        );
+    }
+
+    #[test]
+    fn test_owner_changed() {
+        let (_, _, mut borrowed) = setup!();
+        borrowed.set_owner(Pubkey::default());
+        let AccountSharedData::Borrowed(borrowed) = borrowed else {
+            panic!("Borrowed account should not have been upgraded to Owned after owner change");
+        };
+        assert_eq!(
+            unsafe { *borrowed.owner },
+            Pubkey::default(),
+            "account owner must have changed"
+        );
+        assert!(
+            borrowed.owner_changed,
+            "owner_changed flag must have been set"
         );
     }
 }

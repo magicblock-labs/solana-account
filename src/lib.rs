@@ -301,7 +301,8 @@ impl WritableAccount for AccountSharedData {
         match self {
             Self::Borrowed(acc) => unsafe {
                 acc.cow();
-                *acc.owner = owner
+                acc.owner_changed = *acc.owner != owner;
+                *acc.owner = owner;
             },
             Self::Owned(acc) => acc.owner = owner,
         }
