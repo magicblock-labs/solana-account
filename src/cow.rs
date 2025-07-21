@@ -37,6 +37,8 @@ pub struct AccountBorrowed {
     pub(crate) owner: *mut Pubkey,
     /// a boolean flag to track whether account has changed its owner
     pub owner_changed: bool,
+    /// a boolean flag indicating whether any of the account's fields has been modified
+    pub is_dirty: bool,
     /// various bitpacked flags
     /// 0. whether the account is executable
     /// 1. whether the account is delegated
@@ -69,6 +71,7 @@ impl AccountBorrowed {
         if self.shadow_offset == 0 {
             return;
         }
+        self.is_dirty = true;
         // bulk copy the modifiable section to shadow buffer
         // we start with lamports address and copy the entire current buffer over
         let src = self.lamports as *mut u8;
@@ -119,6 +122,22 @@ impl AccountBorrowed {
             }
         }
         None
+    }
+
+    /// Remember the state of the account using Sequence Lock pattern
+    pub fn lock(&self) -> AccountSeqLock {
+        let counter = self.shadow_switch.clone();
+        let current = counter.counter();
+        AccountSeqLock { counter, current }
+    }
+
+    /// Re-read the account state from the database, this is used in Sequence Lock
+    /// pattern, if the account has been modified during the read operation
+    pub fn reinit(&mut self) {
+        let memptr = self.shadow_switch.inner();
+        // SAFETY: the invocation is safe as we are reusing the pointer from
+        // shadow_switch which points to the beginning of the valid allocation
+        *self = unsafe { AccountSharedData::deserialize_from_mmap(memptr) };
     }
 }
 
@@ -326,6 +345,7 @@ impl AccountSharedData {
             shadow_offset,
             shadow_switch,
             owner_changed: false,
+            is_dirty: false,
             flags: BitFlags(flags),
         }
     }
@@ -358,6 +378,15 @@ impl AccountSharedData {
         match self {
             Self::Borrowed(acc) => acc.flags.is_set(IS_DELEGATED_FLAG_INDEX),
             Self::Owned(acc) => acc.is_delegated,
+        }
+    }
+
+    /// Whether account has been modified by a transaction
+    pub fn is_dirty(&self) -> bool {
+        match self {
+            Self::Borrowed(acc) => acc.is_dirty,
+            // owned accounts are always modified
+            Self::Owned(_) => true,
         }
     }
 }
@@ -396,13 +425,18 @@ impl From<*mut AtomicU32> for ShadowSwitch {
 
 impl ShadowSwitch {
     #[inline(always)]
-    fn counter(&self) -> u32 {
+    pub(crate) fn counter(&self) -> u32 {
         unsafe { &*self.0 }.load(Ordering::Relaxed)
     }
 
     #[inline(always)]
     fn increment(&self) {
         unsafe { &*self.0 }.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    fn inner(&self) -> *mut u8 {
+        self.0 as *mut u8
     }
 }
 
@@ -439,6 +473,21 @@ impl DataSlice {
         // dirty hack: len u32 is guaranteed to be located 4 bytes before the
         // data pointer, we jump back to it and modify
         (self.ptr.offset(DATA_LENGTH_POINTER_OFFSET) as *mut u32).write(len as u32);
+    }
+}
+
+pub struct AccountSeqLock {
+    counter: ShadowSwitch,
+    current: u32,
+}
+
+impl AccountSeqLock {
+    pub fn relock(&mut self) {
+        self.current = self.counter.counter();
+    }
+
+    pub fn changed(&self) -> bool {
+        self.counter.counter() != self.current
     }
 }
 
