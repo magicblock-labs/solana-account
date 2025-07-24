@@ -16,7 +16,7 @@ use crate::AccountSharedData;
 const DATA_LENGTH_POINTER_OFFSET: isize = -4;
 
 pub(crate) const EXECUTABLE_FLAG_INDEX: u32 = 0;
-pub(crate) const IS_DELEGATED_FLAG_INDEX: u32 = 1;
+pub(crate) const DELEGATED_FLAG_INDEX: u32 = 1;
 
 /// Memory optimized version of account shared data, which internally uses raw pointers to
 /// manipulate database (memory mapped) directly. If the account is modified, the modification
@@ -156,7 +156,7 @@ pub struct AccountOwned {
     /// the epoch at which this account will next owe rent
     pub(crate) rent_epoch: Epoch,
     /// a boolean flag to track whether account has been delegated to the host ER node
-    pub(crate) is_delegated: bool,
+    pub(crate) delegated: bool,
 }
 
 impl Default for AccountSharedData {
@@ -311,9 +311,9 @@ impl AccountSharedData {
         serializer.write(acc.owner);
         // write various flags into next 32 bits (for alignment purposes),
         // bit 0 is "executable" flag
-        // bit 1 is "is_delegated" flag
+        // bit 1 is "delegated" flag
         // also the remaining upper 30 bits can bit used for various future extensions
-        let flags = acc.executable as u32 | ((acc.is_delegated as u32) << 1);
+        let flags = acc.executable as u32 | ((acc.delegated as u32) << 1);
         serializer.write(flags);
         // write the capacity allocated for the data field
         serializer.write(capacity.saturating_sub(Self::ACCOUNT_STATIC_SIZE));
@@ -750,7 +750,7 @@ mod tests {
     fn test_bitflags() {
         let (_, _, mut borrowed) = setup!();
         assert!(
-            !borrowed.is_delegated(),
+            !borrowed.delegated(),
             "account should not be delegated by default"
         );
         assert!(
@@ -764,7 +764,7 @@ mod tests {
         );
         borrowed.set_delegated(true);
         assert!(
-            borrowed.is_delegated(),
+            borrowed.delegated(),
             "account should have become delegated after change"
         );
     }

@@ -1,7 +1,7 @@
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 //! The Solana [`Account`] type.
 
-use cow::{AccountBorrowed, AccountOwned, EXECUTABLE_FLAG_INDEX, IS_DELEGATED_FLAG_INDEX};
+use cow::{AccountBorrowed, AccountOwned, EXECUTABLE_FLAG_INDEX, DELEGATED_FLAG_INDEX};
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
 #[cfg(feature = "serde")]
@@ -167,7 +167,7 @@ impl From<Account> for AccountSharedData {
     fn from(other: Account) -> Self {
         Self::Owned(AccountOwned {
             lamports: other.lamports,
-            is_delegated: false,
+            delegated: false,
             data: Arc::new(other.data),
             owner: other.owner,
             executable: other.executable,
@@ -345,7 +345,7 @@ impl WritableAccount for AccountSharedData {
             owner,
             executable,
             rent_epoch,
-            is_delegated: false,
+            delegated: false,
         })
     }
 }
@@ -619,7 +619,7 @@ impl AccountSharedData {
 
     fn ensure_owned(&mut self) {
         if let Self::Borrowed(acc) = self {
-            let is_delegated = acc.flags.is_set(IS_DELEGATED_FLAG_INDEX);
+            let is_delegated = acc.flags.is_set(DELEGATED_FLAG_INDEX);
             *self = unsafe {
                 Self::Owned(AccountOwned {
                     lamports: *acc.lamports,
@@ -627,7 +627,7 @@ impl AccountSharedData {
                     owner: *acc.owner,
                     executable: acc.flags.is_set(EXECUTABLE_FLAG_INDEX),
                     rent_epoch: Epoch::MAX,
-                    is_delegated,
+                    delegated: is_delegated,
                 })
             }
         }
@@ -635,9 +635,9 @@ impl AccountSharedData {
 
     pub fn set_delegated(&mut self, is_delegated: bool) {
         match self {
-            Self::Owned(acc) => acc.is_delegated = is_delegated,
+            Self::Owned(acc) => acc.delegated = is_delegated,
             Self::Borrowed(acc) => {
-                acc.flags.set(is_delegated, IS_DELEGATED_FLAG_INDEX);
+                acc.flags.set(is_delegated, DELEGATED_FLAG_INDEX);
             }
         }
     }
@@ -645,8 +645,8 @@ impl AccountSharedData {
     /// Whether the given account is delegated or not
     pub fn delegated(&self) -> bool {
         match self {
-            Self::Borrowed(acc) => acc.flags.is_set(IS_DELEGATED_FLAG_INDEX),
-            Self::Owned(acc) => acc.is_delegated,
+            Self::Borrowed(acc) => acc.flags.is_set(DELEGATED_FLAG_INDEX),
+            Self::Owned(acc) => acc.delegated,
         }
     }
 
