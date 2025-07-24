@@ -544,7 +544,7 @@ mod tests {
 
     #[test]
     fn test_serde() {
-        let (_, owned, borrowed) = setup!();
+        let (_buffer, owned, borrowed) = setup!();
         assert!(
             accounts_equal(&borrowed, &owned),
             "deserialization of serialized account should result in the same account"
@@ -619,7 +619,7 @@ mod tests {
 
     #[test]
     fn test_upgrade_to_owned() {
-        let (_, owned, mut borrowed) = setup!();
+        let (_buffer, owned, mut borrowed) = setup!();
         let len = borrowed.data().len();
         let msg = b"hello world?";
         borrowed.extend_from_slice(msg);
@@ -640,7 +640,7 @@ mod tests {
 
     #[test]
     fn test_setting_data_from_slice() {
-        let (_, _, mut borrowed) = setup!();
+        let (_buffer, _, mut borrowed) = setup!();
         let len = borrowed.data().len();
         let msg = b"hello world?";
         borrowed.set_data_from_slice(msg);
@@ -667,7 +667,7 @@ mod tests {
 
     #[test]
     fn test_account_shrinking() {
-        let (_, _, mut borrowed) = setup!();
+        let (_buffer, _, mut borrowed) = setup!();
         borrowed.resize(0, 0);
         assert_eq!(
             borrowed.data(),
@@ -697,7 +697,7 @@ mod tests {
 
     #[test]
     fn test_account_growth() {
-        let (_, _, mut borrowed) = setup!();
+        let (_buffer, _, mut borrowed) = setup!();
         borrowed.resize(SPACE * 2, 0);
         assert_eq!(
             borrowed.data().len(),
@@ -730,7 +730,7 @@ mod tests {
 
     #[test]
     fn test_owner_changed() {
-        let (_, _, mut borrowed) = setup!();
+        let (_buffer, _, mut borrowed) = setup!();
         borrowed.set_owner(Pubkey::default());
         let AccountSharedData::Borrowed(borrowed) = borrowed else {
             panic!("Borrowed account should not have been upgraded to Owned after owner change");
@@ -748,7 +748,7 @@ mod tests {
 
     #[test]
     fn test_bitflags() {
-        let (_, _, mut borrowed) = setup!();
+        let (_buffer, _, mut borrowed) = setup!();
         assert!(
             !borrowed.delegated(),
             "account should not be delegated by default"
