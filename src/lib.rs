@@ -426,37 +426,28 @@ impl ReadableAccount for Ref<'_, Account> {
     }
 }
 
-fn debug_fmt<T: ReadableAccount>(item: &T, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    let mut f = f.debug_struct("Account");
-
+fn debug_fmt<T: ReadableAccount>(item: &T, f: &mut fmt::DebugStruct<'_, '_>) {
     f.field("lamports", &item.lamports())
         .field("data.len", &item.data().len())
         .field("owner", &item.owner())
         .field("executable", &item.executable())
         .field("rent_epoch", &item.rent_epoch());
-    debug_account_data(item.data(), &mut f);
-
-    f.finish()
+    debug_account_data(item.data(), f);
 }
 
 impl fmt::Debug for Account {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        debug_fmt(self, f)
+        let mut f = f.debug_struct("Account");
+        debug_fmt(self, &mut f);
+        f.finish()
     }
 }
 
 impl fmt::Debug for AccountSharedData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut f = f.debug_struct("AccountSharedData");
-
-        f.field("lamports", &self.lamports())
-            .field("data.len", &self.data().len())
-            .field("owner", &self.owner())
-            .field("executable", &self.executable())
-            .field("rent_epoch", &self.rent_epoch())
-            .field("delegated", &self.delegated());
-        debug_account_data(self.data(), &mut f);
-
+        debug_fmt(self, &mut f);
+        f.field("delegated", &self.delegated());
         f.finish()
     }
 }
