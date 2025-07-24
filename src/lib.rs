@@ -642,6 +642,14 @@ impl AccountSharedData {
         }
     }
 
+    /// Whether the given account is delegated or not
+    pub fn delegated(&self) -> bool {
+        match self {
+            Self::Borrowed(acc) => acc.flags.is_set(IS_DELEGATED_FLAG_INDEX),
+            Self::Owned(acc) => acc.is_delegated,
+        }
+    }
+
     pub fn reserve(&mut self, additional: usize) {
         if let Self::Borrowed(acc) = self {
             if (acc.data.cap as usize) < (acc.data.len as usize + additional) {

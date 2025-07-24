@@ -21,7 +21,7 @@ pub(crate) const IS_DELEGATED_FLAG_INDEX: u32 = 1;
 /// Memory optimized version of account shared data, which internally uses raw pointers to
 /// manipulate database (memory mapped) directly. If the account is modified, the modification
 /// triggers Copy on Write and all the changes are written to shadow buffer which can be discarded
-/// if necessary (e.g. transaction fails).  
+/// if necessary (e.g. transaction fails).
 #[derive(Clone, PartialEq, Eq)]
 pub struct AccountBorrowed {
     /// shadow buffer switch counter
@@ -370,14 +370,6 @@ impl AccountSharedData {
             deserializer,
             shadow_offset,
             shadow_switch,
-        }
-    }
-
-    /// Whether the given account is delegated or not
-    pub fn is_delegated(&self) -> bool {
-        match self {
-            Self::Borrowed(acc) => acc.flags.is_set(IS_DELEGATED_FLAG_INDEX),
-            Self::Owned(acc) => acc.is_delegated,
         }
     }
 
