@@ -1,7 +1,7 @@
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 //! The Solana [`Account`] type.
 
-use cow::{AccountBorrowed, AccountOwned, EXECUTABLE_FLAG_INDEX, DELEGATED_FLAG_INDEX};
+use cow::{AccountBorrowed, AccountOwned, DELEGATED_FLAG_INDEX, EXECUTABLE_FLAG_INDEX};
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
 #[cfg(feature = "serde")]
@@ -619,7 +619,7 @@ impl AccountSharedData {
 
     fn ensure_owned(&mut self) {
         if let Self::Borrowed(acc) = self {
-            let is_delegated = acc.flags.is_set(DELEGATED_FLAG_INDEX);
+            let delegated = acc.flags.is_set(DELEGATED_FLAG_INDEX);
             *self = unsafe {
                 Self::Owned(AccountOwned {
                     lamports: *acc.lamports,
@@ -627,17 +627,17 @@ impl AccountSharedData {
                     owner: *acc.owner,
                     executable: acc.flags.is_set(EXECUTABLE_FLAG_INDEX),
                     rent_epoch: Epoch::MAX,
-                    delegated: is_delegated,
+                    delegated,
                 })
             }
         }
     }
 
-    pub fn set_delegated(&mut self, is_delegated: bool) {
+    pub fn set_delegated(&mut self, delegated: bool) {
         match self {
-            Self::Owned(acc) => acc.delegated = is_delegated,
+            Self::Owned(acc) => acc.delegated = delegated,
             Self::Borrowed(acc) => {
-                acc.flags.set(is_delegated, DELEGATED_FLAG_INDEX);
+                acc.flags.set(delegated, DELEGATED_FLAG_INDEX);
             }
         }
     }
