@@ -447,7 +447,17 @@ impl fmt::Debug for Account {
 
 impl fmt::Debug for AccountSharedData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        debug_fmt(self, f)
+        let mut f = f.debug_struct("AccountSharedData");
+
+        f.field("lamports", &self.lamports())
+            .field("data.len", &self.data().len())
+            .field("owner", &self.owner())
+            .field("executable", &self.executable())
+            .field("rent_epoch", &self.rent_epoch())
+            .field("delegated", &self.delegated());
+        debug_account_data(self.data(), &mut f);
+
+        f.finish()
     }
 }
 
