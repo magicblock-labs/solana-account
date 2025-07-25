@@ -172,6 +172,7 @@ impl From<Account> for AccountSharedData {
             owner: other.owner,
             executable: other.executable,
             rent_epoch: other.rent_epoch,
+            remote_slot: u64::default(),
         })
     }
 }
@@ -345,6 +346,7 @@ impl WritableAccount for AccountSharedData {
             owner,
             executable,
             rent_epoch,
+            remote_slot: u64::default(),
             delegated: false,
         })
     }
@@ -447,6 +449,7 @@ impl fmt::Debug for AccountSharedData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut f = f.debug_struct("AccountSharedData");
         debug_fmt(self, &mut f);
+        f.field("remote_slot", &self.remote_slot());
         f.field("delegated", &self.delegated());
         f.finish()
     }
@@ -628,6 +631,7 @@ impl AccountSharedData {
                     owner: *acc.owner,
                     executable: acc.flags.is_set(EXECUTABLE_FLAG_INDEX),
                     rent_epoch: Epoch::MAX,
+                    remote_slot: *acc.remote_slot,
                     delegated,
                 })
             }
@@ -648,6 +652,23 @@ impl AccountSharedData {
         match self {
             Self::Borrowed(acc) => acc.flags.is_set(DELEGATED_FLAG_INDEX),
             Self::Owned(acc) => acc.delegated,
+        }
+    }
+
+    pub fn remote_slot(&self) -> u64 {
+        match self {
+            Self::Borrowed(acc) => unsafe { *acc.remote_slot },
+            Self::Owned(acc) => acc.remote_slot,
+        }
+    }
+
+    pub fn set_remote_slot(&mut self, remote_slot: u64) {
+        match self {
+            Self::Owned(acc) => acc.remote_slot = remote_slot,
+            Self::Borrowed(acc) => unsafe {
+                acc.cow();
+                *acc.remote_slot = remote_slot;
+            },
         }
     }
 
