@@ -638,6 +638,7 @@ impl AccountSharedData {
         match self {
             Self::Owned(acc) => acc.delegated = delegated,
             Self::Borrowed(acc) => {
+                unsafe { acc.cow() };
                 acc.flags.set(delegated, DELEGATED_FLAG_INDEX);
             }
         }
