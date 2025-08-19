@@ -698,6 +698,13 @@ impl AccountSharedData {
         }
     }
 
+    pub fn data_clone(&self) -> Arc<Vec<u8>> {
+        // NOTE: original implementation: Arc::clone(&self.data), but we don't have a `data` field.
+        // See: https://github.com/anza-xyz/solana-sdk/blob/master/account/src/lib.rs#L600
+        // This just satisfies the compiler, but due to copying is not performant.
+        Arc::new(self.data().to_vec())
+    }
+
     #[inline]
     fn data_mut(&mut self) -> &mut [u8] {
         match self {
