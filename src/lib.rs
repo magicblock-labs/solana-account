@@ -618,7 +618,7 @@ impl AccountSharedData {
         }
     }
 
-    fn ensure_owned(&mut self) {
+    pub fn ensure_owned(&mut self) {
         if let Self::Borrowed(acc) = self {
             let delegated = acc.flags.is_set(DELEGATED_FLAG_INDEX);
             *self = unsafe {
