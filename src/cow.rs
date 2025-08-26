@@ -137,11 +137,11 @@ impl AccountBorrowed {
 
     /// Re-read the account state from the database, this is used in Sequence Lock
     /// pattern, if the account has been modified during the read operation
-    pub fn reinit(&mut self) {
+    pub fn reinit(&self) -> AccountSharedData {
         let memptr = self.shadow_switch.inner();
         // SAFETY: the invocation is safe as we are reusing the pointer from
         // shadow_switch which points to the beginning of the valid allocation
-        *self = unsafe { AccountSharedData::deserialize_from_mmap(memptr) };
+        unsafe { AccountSharedData::deserialize_from_mmap(memptr).into() }
     }
 }
 
@@ -431,12 +431,12 @@ impl From<*mut AtomicU32> for ShadowSwitch {
 impl ShadowSwitch {
     #[inline(always)]
     pub(crate) fn counter(&self) -> u32 {
-        unsafe { &*self.0 }.load(Ordering::Relaxed)
+        unsafe { &*self.0 }.load(Ordering::Acquire)
     }
 
     #[inline(always)]
     fn increment(&self) {
-        unsafe { &*self.0 }.fetch_add(1, Ordering::Relaxed);
+        unsafe { &*self.0 }.fetch_add(1, Ordering::Release);
     }
 
     #[inline(always)]
@@ -481,6 +481,7 @@ impl DataSlice {
     }
 }
 
+#[derive(Clone)]
 pub struct AccountSeqLock {
     counter: ShadowSwitch,
     current: u32,
@@ -495,6 +496,12 @@ impl AccountSeqLock {
         self.counter.counter() != self.current
     }
 }
+
+/// SAFETY:
+/// *const AtomicU32 access is only ever performed via atomic
+/// operations and thus doesn't cause race conditions
+unsafe impl Send for AccountSeqLock {}
+unsafe impl Sync for AccountSeqLock {}
 
 #[cfg(test)]
 mod tests {
