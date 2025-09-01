@@ -10,8 +10,6 @@ use solana_sdk_ids::{bpf_loader, bpf_loader_deprecated, bpf_loader_upgradeable, 
 #[cfg(feature = "bincode")]
 use solana_sysvar::Sysvar;
 
-use crate::cow::BORKED_FLAG_INDEX;
-
 use {
     solana_account_info::{debug_account_data::*, AccountInfo},
     solana_clock::{Epoch, INITIAL_RENT_EPOCH},
@@ -632,7 +630,7 @@ impl AccountSharedData {
                     executable: acc.flags.is_set(EXECUTABLE_FLAG_INDEX),
                     rent_epoch: Epoch::MAX,
                     delegated: acc.flags.is_set(DELEGATED_FLAG_INDEX),
-                    borked: acc.flags.is_set(BORKED_FLAG_INDEX),
+                    borked: acc.borked,
                 })
             }
         }
@@ -658,17 +656,14 @@ impl AccountSharedData {
 
     pub fn borked(&self) -> bool {
         match self {
-            Self::Borrowed(acc) => acc.flags.is_set(BORKED_FLAG_INDEX),
+            Self::Borrowed(acc) => acc.borked,
             Self::Owned(acc) => acc.borked,
         }
     }
 
     pub fn set_borked(&mut self, borked: bool) {
         match self {
-            Self::Borrowed(acc) => {
-                unsafe { acc.cow() };
-                acc.flags.set(borked, BORKED_FLAG_INDEX);
-            }
+            Self::Borrowed(acc) => acc.borked = borked,
             Self::Owned(acc) => acc.borked = borked,
         }
     }

@@ -17,7 +17,6 @@ const DATA_LENGTH_POINTER_OFFSET: isize = -4;
 
 pub(crate) const EXECUTABLE_FLAG_INDEX: u32 = 0;
 pub(crate) const DELEGATED_FLAG_INDEX: u32 = 1;
-pub(crate) const BORKED_FLAG_INDEX: u32 = 1;
 
 /// Memory optimized version of account shared data, which internally uses raw pointers to
 /// manipulate database (memory mapped) directly. If the account is modified, the modification
@@ -38,12 +37,14 @@ pub struct AccountBorrowed {
     pub(crate) owner: *mut Pubkey,
     /// a boolean flag to track whether account has changed its owner
     pub owner_changed: bool,
+    /// whether the account has been intentially borked due to undelegation
+    /// NOTE: this flag is ephemeral and is not persisted
+    pub borked: bool,
     /// a boolean flag indicating whether any of the account's fields has been modified
     pub is_dirty: bool,
     /// various bitpacked flags
     /// 0. whether the account is executable
     /// 1. whether the account is delegated
-    /// 2. whether the account has been intentially borked due to undelegation
     pub(crate) flags: BitFlags,
 }
 
@@ -320,8 +321,7 @@ impl AccountSharedData {
         // bit 2 is "borked" flag
         // also the remaining upper 29 bits can bit used for various future extensions
         let flags = (acc.executable as u32) << EXECUTABLE_FLAG_INDEX
-            | (acc.delegated as u32) << DELEGATED_FLAG_INDEX
-            | (acc.borked as u32) << BORKED_FLAG_INDEX;
+            | (acc.delegated as u32) << DELEGATED_FLAG_INDEX;
         serializer.write(flags);
         // write the capacity allocated for the data field
         serializer.write(capacity.saturating_sub(Self::ACCOUNT_STATIC_SIZE));
@@ -353,6 +353,7 @@ impl AccountSharedData {
             shadow_offset,
             shadow_switch,
             owner_changed: false,
+            borked: false,
             is_dirty: false,
             flags: BitFlags(flags),
         }
