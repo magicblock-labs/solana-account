@@ -17,6 +17,7 @@ const DATA_LENGTH_POINTER_OFFSET: isize = -4;
 
 pub(crate) const EXECUTABLE_FLAG_INDEX: u32 = 0;
 pub(crate) const DELEGATED_FLAG_INDEX: u32 = 1;
+pub(crate) const BORKED_FLAG_INDEX: u32 = 1;
 
 /// Memory optimized version of account shared data, which internally uses raw pointers to
 /// manipulate database (memory mapped) directly. If the account is modified, the modification
@@ -42,6 +43,7 @@ pub struct AccountBorrowed {
     /// various bitpacked flags
     /// 0. whether the account is executable
     /// 1. whether the account is delegated
+    /// 2. whether the account has been intentially borked due to undelegation
     pub(crate) flags: BitFlags,
 }
 
@@ -155,8 +157,11 @@ pub struct AccountOwned {
     pub(crate) executable: bool,
     /// the epoch at which this account will next owe rent
     pub(crate) rent_epoch: Epoch,
-    /// a boolean flag to track whether account has been delegated to the host ER node
+    /// a boolean flag to track whether the account has been delegated to the host ER node
     pub(crate) delegated: bool,
+    /// a boolean flag to track whether the account has
+    /// been intentially borked (made immutable on ER)
+    pub(crate) borked: bool,
 }
 
 impl Default for AccountSharedData {
@@ -312,8 +317,11 @@ impl AccountSharedData {
         // write various flags into next 32 bits (for alignment purposes),
         // bit 0 is "executable" flag
         // bit 1 is "delegated" flag
-        // also the remaining upper 30 bits can bit used for various future extensions
-        let flags = acc.executable as u32 | ((acc.delegated as u32) << 1);
+        // bit 2 is "borked" flag
+        // also the remaining upper 29 bits can bit used for various future extensions
+        let flags = (acc.executable as u32) << EXECUTABLE_FLAG_INDEX
+            | (acc.delegated as u32) << DELEGATED_FLAG_INDEX
+            | (acc.borked as u32) << BORKED_FLAG_INDEX;
         serializer.write(flags);
         // write the capacity allocated for the data field
         serializer.write(capacity.saturating_sub(Self::ACCOUNT_STATIC_SIZE));
@@ -764,6 +772,10 @@ mod tests {
             !borrowed.executable(),
             "account should not be executable by default"
         );
+        assert!(
+            !borrowed.borked(),
+            "account should not be borked by default"
+        );
         borrowed.set_executable(true);
         assert!(
             borrowed.executable(),
@@ -773,6 +785,11 @@ mod tests {
         assert!(
             borrowed.delegated(),
             "account should have become delegated after change"
+        );
+        borrowed.set_borked(true);
+        assert!(
+            borrowed.borked(),
+            "account should have become borked after change"
         );
     }
 }

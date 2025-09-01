@@ -10,6 +10,8 @@ use solana_sdk_ids::{bpf_loader, bpf_loader_deprecated, bpf_loader_upgradeable, 
 #[cfg(feature = "bincode")]
 use solana_sysvar::Sysvar;
 
+use crate::cow::BORKED_FLAG_INDEX;
+
 use {
     solana_account_info::{debug_account_data::*, AccountInfo},
     solana_clock::{Epoch, INITIAL_RENT_EPOCH},
@@ -168,6 +170,7 @@ impl From<Account> for AccountSharedData {
         Self::Owned(AccountOwned {
             lamports: other.lamports,
             delegated: false,
+            borked: false,
             data: Arc::new(other.data),
             owner: other.owner,
             executable: other.executable,
@@ -346,6 +349,7 @@ impl WritableAccount for AccountSharedData {
             executable,
             rent_epoch,
             delegated: false,
+            borked: false,
         })
     }
 }
@@ -620,7 +624,6 @@ impl AccountSharedData {
 
     pub fn ensure_owned(&mut self) {
         if let Self::Borrowed(acc) = self {
-            let delegated = acc.flags.is_set(DELEGATED_FLAG_INDEX);
             *self = unsafe {
                 Self::Owned(AccountOwned {
                     lamports: *acc.lamports,
@@ -628,7 +631,8 @@ impl AccountSharedData {
                     owner: *acc.owner,
                     executable: acc.flags.is_set(EXECUTABLE_FLAG_INDEX),
                     rent_epoch: Epoch::MAX,
-                    delegated,
+                    delegated: acc.flags.is_set(DELEGATED_FLAG_INDEX),
+                    borked: acc.flags.is_set(BORKED_FLAG_INDEX),
                 })
             }
         }
@@ -649,6 +653,23 @@ impl AccountSharedData {
         match self {
             Self::Borrowed(acc) => acc.flags.is_set(DELEGATED_FLAG_INDEX),
             Self::Owned(acc) => acc.delegated,
+        }
+    }
+
+    pub fn borked(&self) -> bool {
+        match self {
+            Self::Borrowed(acc) => acc.flags.is_set(BORKED_FLAG_INDEX),
+            Self::Owned(acc) => acc.borked,
+        }
+    }
+
+    pub fn set_borked(&mut self, borked: bool) {
+        match self {
+            Self::Borrowed(acc) => {
+                unsafe { acc.cow() };
+                acc.flags.set(borked, BORKED_FLAG_INDEX);
+            }
+            Self::Owned(acc) => acc.borked = borked,
         }
     }
 
