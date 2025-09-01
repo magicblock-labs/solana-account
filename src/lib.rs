@@ -168,6 +168,7 @@ impl From<Account> for AccountSharedData {
         Self::Owned(AccountOwned {
             lamports: other.lamports,
             delegated: false,
+            borked: false,
             data: Arc::new(other.data),
             owner: other.owner,
             executable: other.executable,
@@ -346,6 +347,7 @@ impl WritableAccount for AccountSharedData {
             executable,
             rent_epoch,
             delegated: false,
+            borked: false,
         })
     }
 }
@@ -620,7 +622,6 @@ impl AccountSharedData {
 
     pub fn ensure_owned(&mut self) {
         if let Self::Borrowed(acc) = self {
-            let delegated = acc.flags.is_set(DELEGATED_FLAG_INDEX);
             *self = unsafe {
                 Self::Owned(AccountOwned {
                     lamports: *acc.lamports,
@@ -628,7 +629,8 @@ impl AccountSharedData {
                     owner: *acc.owner,
                     executable: acc.flags.is_set(EXECUTABLE_FLAG_INDEX),
                     rent_epoch: Epoch::MAX,
-                    delegated,
+                    delegated: acc.flags.is_set(DELEGATED_FLAG_INDEX),
+                    borked: acc.borked,
                 })
             }
         }
@@ -649,6 +651,20 @@ impl AccountSharedData {
         match self {
             Self::Borrowed(acc) => acc.flags.is_set(DELEGATED_FLAG_INDEX),
             Self::Owned(acc) => acc.delegated,
+        }
+    }
+
+    pub fn borked(&self) -> bool {
+        match self {
+            Self::Borrowed(acc) => acc.borked,
+            Self::Owned(acc) => acc.borked,
+        }
+    }
+
+    pub fn set_borked(&mut self, borked: bool) {
+        match self {
+            Self::Borrowed(acc) => acc.borked = borked,
+            Self::Owned(acc) => acc.borked = borked,
         }
     }
 

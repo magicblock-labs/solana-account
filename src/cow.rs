@@ -37,6 +37,9 @@ pub struct AccountBorrowed {
     pub(crate) owner: *mut Pubkey,
     /// a boolean flag to track whether account has changed its owner
     pub owner_changed: bool,
+    /// whether the account has been intentially borked due to undelegation
+    /// NOTE: this flag is ephemeral and is not persisted
+    pub borked: bool,
     /// a boolean flag indicating whether any of the account's fields has been modified
     pub is_dirty: bool,
     /// various bitpacked flags
@@ -155,8 +158,11 @@ pub struct AccountOwned {
     pub(crate) executable: bool,
     /// the epoch at which this account will next owe rent
     pub(crate) rent_epoch: Epoch,
-    /// a boolean flag to track whether account has been delegated to the host ER node
+    /// a boolean flag to track whether the account has been delegated to the host ER node
     pub(crate) delegated: bool,
+    /// a boolean flag to track whether the account has
+    /// been intentially borked (made immutable on ER)
+    pub(crate) borked: bool,
 }
 
 impl Default for AccountSharedData {
@@ -312,8 +318,10 @@ impl AccountSharedData {
         // write various flags into next 32 bits (for alignment purposes),
         // bit 0 is "executable" flag
         // bit 1 is "delegated" flag
-        // also the remaining upper 30 bits can bit used for various future extensions
-        let flags = acc.executable as u32 | ((acc.delegated as u32) << 1);
+        // bit 2 is "borked" flag
+        // also the remaining upper 29 bits can bit used for various future extensions
+        let flags = (acc.executable as u32) << EXECUTABLE_FLAG_INDEX
+            | (acc.delegated as u32) << DELEGATED_FLAG_INDEX;
         serializer.write(flags);
         // write the capacity allocated for the data field
         serializer.write(capacity.saturating_sub(Self::ACCOUNT_STATIC_SIZE));
@@ -345,6 +353,7 @@ impl AccountSharedData {
             shadow_offset,
             shadow_switch,
             owner_changed: false,
+            borked: false,
             is_dirty: false,
             flags: BitFlags(flags),
         }
@@ -764,6 +773,10 @@ mod tests {
             !borrowed.executable(),
             "account should not be executable by default"
         );
+        assert!(
+            !borrowed.borked(),
+            "account should not be borked by default"
+        );
         borrowed.set_executable(true);
         assert!(
             borrowed.executable(),
@@ -773,6 +786,11 @@ mod tests {
         assert!(
             borrowed.delegated(),
             "account should have become delegated after change"
+        );
+        borrowed.set_borked(true);
+        assert!(
+            borrowed.borked(),
+            "account should have become borked after change"
         );
     }
 }
