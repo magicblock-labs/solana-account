@@ -17,6 +17,8 @@ solana-instruction = "2.2"
 solana-pubkey = "2.2"
 solana-sysvar = "2.2"
 solana-sdk-ids = "2.2"
+solana-frozen-abi = { version = "2.2", optional = true, default-features = false }
+solana-frozen-abi-macro = { version = "2.2", optional = true, default-features = false }
 
 
 [features]
@@ -33,6 +35,11 @@ serde = [
     "dep:serde_bytes",
     "dep:serde_derive",
     "solana-pubkey/serde",
+]
+# Enable ABI freeze support and forward to dependent crates
+frozen-abi = [
+    "dep:solana-frozen-abi",
+    "dep:solana-frozen-abi-macro",
 ]
 
 [package.metadata.docs.rs]

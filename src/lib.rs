@@ -6,6 +6,8 @@ use cow::{AccountBorrowed, AccountOwned, DELEGATED_FLAG_INDEX, EXECUTABLE_FLAG_I
 use qualifier_attr::qualifiers;
 #[cfg(feature = "serde")]
 use serde::ser::{Serialize, Serializer};
+#[cfg(feature = "frozen-abi")]
+use solana_frozen_abi::abi_example::AbiExample;
 use solana_sdk_ids::{bpf_loader, bpf_loader_deprecated, bpf_loader_upgradeable, loader_v4};
 #[cfg(feature = "bincode")]
 use solana_sysvar::Sysvar;
@@ -37,6 +39,7 @@ pub mod cow;
     derive(serde_derive::Deserialize),
     serde(rename_all = "camelCase")
 )]
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(PartialEq, Eq, Clone, Default)]
 pub struct Account {
     /// lamports in the account
