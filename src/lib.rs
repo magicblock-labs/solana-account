@@ -1,7 +1,10 @@
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 //! The Solana [`Account`] type.
 
-use cow::{AccountBorrowed, AccountOwned, DELEGATED_FLAG_INDEX, EXECUTABLE_FLAG_INDEX, PRIVILEGED_FLAG_INDEX};
+use cow::{
+    AccountBorrowed, AccountOwned, DELEGATED_FLAG_INDEX, EXECUTABLE_FLAG_INDEX,
+    PRIVILEGED_FLAG_INDEX,
+};
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
 #[cfg(feature = "serde")]
@@ -1163,23 +1166,32 @@ pub mod tests {
     fn test_privileged_flag() {
         let key = Pubkey::new_unique();
         let (_, mut account) = make_two_accounts(&key);
-        
+
         // Test initial state
-        assert!(!account.privileged(), "account should not be privileged by default");
-        
+        assert!(
+            !account.privileged(),
+            "account should not be privileged by default"
+        );
+
         // Test setting privileged to true
         account.set_privileged(true);
-        assert!(account.privileged(), "account should be privileged after setting to true");
-        
+        assert!(
+            account.privileged(),
+            "account should be privileged after setting to true"
+        );
+
         // Test setting privileged to false
         account.set_privileged(false);
-        assert!(!account.privileged(), "account should not be privileged after setting to false");
-        
+        assert!(
+            !account.privileged(),
+            "account should not be privileged after setting to false"
+        );
+
         // Test that other flags are not affected
         account.set_privileged(true);
         account.set_delegated(true);
         account.set_executable(false);
-        
+
         assert!(account.privileged(), "privileged flag should remain true");
         assert!(account.delegated(), "delegated flag should be true");
         assert!(!account.executable(), "executable flag should be false");
