@@ -77,6 +77,7 @@ const RELATIVE_DATA_CAP_POINTER_OFFSET: isize = -8;
 // --- Flag bit indices ---
 pub(crate) const EXECUTABLE_FLAG_INDEX: u32 = 0;
 pub(crate) const DELEGATED_FLAG_INDEX: u32 = 1;
+pub(crate) const PRIVILEGED_FLAG_INDEX: u32 = 2;
 
 // --- Memory Layout Offsets ---
 // NOTE: These constants define the memory layout of a serialized account and must
@@ -258,6 +259,10 @@ pub struct AccountOwned {
     pub(crate) remote_slot: u64,
     /// A flag to track if the account has been delegated.
     pub(crate) delegated: bool,
+    /// A flag to track if the account is privileged.
+    /// It is used to determine if certain checks can be bypassed when this account is
+    /// the signing feepayer of a transaction.
+    pub(crate) privileged: bool,
 }
 
 impl Default for AccountSharedData {
@@ -408,7 +413,8 @@ impl AccountSharedData {
         serializer.write(acc.remote_slot);
         // 6. Flags (bit-packed)
         let flags = (acc.executable as u32) << EXECUTABLE_FLAG_INDEX
-            | (acc.delegated as u32) << DELEGATED_FLAG_INDEX;
+            | (acc.delegated as u32) << DELEGATED_FLAG_INDEX
+            | (acc.privileged as u32) << PRIVILEGED_FLAG_INDEX;
         serializer.write(flags);
         // 7. Data Capacity
         let data_capacity = single_buffer_capacity.saturating_sub(Self::ACCOUNT_STATIC_SIZE);
@@ -973,6 +979,10 @@ mod tests {
             !borrowed.executable(),
             "account should not be executable by default"
         );
+        assert!(
+            !borrowed.privileged(),
+            "account should not be privileged by default"
+        );
 
         borrowed.set_executable(true);
         assert!(
@@ -987,8 +997,18 @@ mod tests {
         // Ensure other flags are unaffected
         assert!(borrowed.executable());
 
+        borrowed.set_privileged(true);
+        assert!(
+            borrowed.privileged(),
+            "account should have become privileged"
+        );
+        // Ensure other flags are unaffected
+        assert!(borrowed.executable());
+        assert!(borrowed.delegated());
+
         borrowed.set_executable(false);
         assert!(!borrowed.executable(), "account should be non-executable");
         assert!(borrowed.delegated(), "delegated flag should remain set");
+        assert!(borrowed.privileged(), "privileged flag should remain set");
     }
 }

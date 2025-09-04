@@ -1,7 +1,7 @@
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 //! The Solana [`Account`] type.
 
-use cow::{AccountBorrowed, AccountOwned, DELEGATED_FLAG_INDEX, EXECUTABLE_FLAG_INDEX};
+use cow::{AccountBorrowed, AccountOwned, DELEGATED_FLAG_INDEX, EXECUTABLE_FLAG_INDEX, PRIVILEGED_FLAG_INDEX};
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
 #[cfg(feature = "serde")]
@@ -171,6 +171,7 @@ impl From<Account> for AccountSharedData {
         Self::Owned(AccountOwned {
             lamports: other.lamports,
             delegated: false,
+            privileged: false,
             data: Arc::new(other.data),
             owner: other.owner,
             executable: other.executable,
@@ -351,6 +352,7 @@ impl WritableAccount for AccountSharedData {
             rent_epoch,
             remote_slot: u64::default(),
             delegated: false,
+            privileged: false,
         })
     }
 }
@@ -454,6 +456,7 @@ impl fmt::Debug for AccountSharedData {
         debug_fmt(self, &mut f);
         f.field("remote_slot", &self.remote_slot());
         f.field("delegated", &self.delegated());
+        f.field("privileged", &self.privileged());
         f.finish()
     }
 }
@@ -627,6 +630,7 @@ impl AccountSharedData {
     pub fn ensure_owned(&mut self) {
         if let Self::Borrowed(acc) = self {
             let delegated = acc.flags.is_set(DELEGATED_FLAG_INDEX);
+            let privileged = acc.flags.is_set(PRIVILEGED_FLAG_INDEX);
             *self = unsafe {
                 Self::Owned(AccountOwned {
                     lamports: *acc.lamports,
@@ -636,6 +640,7 @@ impl AccountSharedData {
                     rent_epoch: Epoch::MAX,
                     remote_slot: *acc.remote_slot,
                     delegated,
+                    privileged,
                 })
             }
         }
@@ -656,6 +661,24 @@ impl AccountSharedData {
         match self {
             Self::Borrowed(acc) => acc.flags.is_set(DELEGATED_FLAG_INDEX),
             Self::Owned(acc) => acc.delegated,
+        }
+    }
+
+    pub fn set_privileged(&mut self, privileged: bool) {
+        match self {
+            Self::Owned(acc) => acc.privileged = privileged,
+            Self::Borrowed(acc) => {
+                unsafe { acc.cow() };
+                acc.flags.set(privileged, PRIVILEGED_FLAG_INDEX);
+            }
+        }
+    }
+
+    /// Whether the given account is privileged or not
+    pub fn privileged(&self) -> bool {
+        match self {
+            Self::Borrowed(acc) => acc.flags.is_set(PRIVILEGED_FLAG_INDEX),
+            Self::Owned(acc) => acc.privileged,
         }
     }
 
@@ -1134,5 +1157,31 @@ pub mod tests {
         account.set_lamports(remaining);
         account.saturating_sub_lamports(remaining * 2);
         assert_eq!(account.lamports(), 0);
+    }
+
+    #[test]
+    fn test_privileged_flag() {
+        let key = Pubkey::new_unique();
+        let (_, mut account) = make_two_accounts(&key);
+        
+        // Test initial state
+        assert!(!account.privileged(), "account should not be privileged by default");
+        
+        // Test setting privileged to true
+        account.set_privileged(true);
+        assert!(account.privileged(), "account should be privileged after setting to true");
+        
+        // Test setting privileged to false
+        account.set_privileged(false);
+        assert!(!account.privileged(), "account should not be privileged after setting to false");
+        
+        // Test that other flags are not affected
+        account.set_privileged(true);
+        account.set_delegated(true);
+        account.set_executable(false);
+        
+        assert!(account.privileged(), "privileged flag should remain true");
+        assert!(account.delegated(), "delegated flag should be true");
+        assert!(!account.executable(), "executable flag should be false");
     }
 }
