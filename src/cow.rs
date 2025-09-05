@@ -976,47 +976,64 @@ mod tests {
         assert!(b.owner_changed, "owner_changed flag must have been set");
     }
 
+    /// A generic helper to test a flag's persistence.
+    fn test_flag_persistence<Set, Get>(set: Set, get: Get, name: &str)
+    where
+        Set: Fn(&mut AccountSharedData, bool),
+        Get: Fn(&AccountSharedData) -> bool,
+    {
+        let (buffer, _, mut acc) = setup!();
+
+        // Check initial state, set to true, and verify persistence.
+        assert!(!get(&acc), "'{}' should be false initially", name);
+        set(&mut acc, true);
+        if let AccountSharedData::Borrowed(b) = &acc {
+            b.commit();
+        }
+        let mut acc_after_set = AccountSharedData::from(unsafe {
+            AccountSharedData::deserialize_from_mmap(buffer.ptr)
+        });
+        assert!(get(&acc_after_set), "'{}' should be true after set", name);
+
+        // Set back to false and verify persistence.
+        set(&mut acc_after_set, false);
+        if let AccountSharedData::Borrowed(b) = &acc_after_set {
+            b.commit();
+        }
+        let acc_after_clear = AccountSharedData::from(unsafe {
+            AccountSharedData::deserialize_from_mmap(buffer.ptr)
+        });
+        assert!(
+            !get(&acc_after_clear),
+            "'{}' should be false after clear",
+            name
+        );
+    }
+
     #[test]
-    fn test_bitflags() {
-        let (_buffer, _, mut borrowed) = setup!();
-        assert!(
-            !borrowed.delegated(),
-            "account should not be delegated by default"
+    fn test_executable_flag_persistence() {
+        test_flag_persistence(
+            |acc, val| acc.set_executable(val),
+            |acc| acc.executable(),
+            "executable",
         );
-        assert!(
-            !borrowed.executable(),
-            "account should not be executable by default"
-        );
-        assert!(
-            !borrowed.privileged(),
-            "account should not be privileged by default"
-        );
+    }
 
-        borrowed.set_executable(true);
-        assert!(
-            borrowed.executable(),
-            "account should have become executable"
+    #[test]
+    fn test_delegated_flag_persistence() {
+        test_flag_persistence(
+            |acc, val| acc.set_delegated(val),
+            |acc| acc.delegated(),
+            "delegated",
         );
-        // Ensure other flags are unaffected
-        assert!(!borrowed.delegated());
+    }
 
-        borrowed.set_delegated(true);
-        assert!(borrowed.delegated(), "account should have become delegated");
-        // Ensure other flags are unaffected
-        assert!(borrowed.executable());
-
-        borrowed.as_borrowed_mut().unwrap().set_privileged(true);
-        assert!(
-            borrowed.privileged(),
-            "account should have become privileged"
+    #[test]
+    fn test_privileged_flag_persistence() {
+        test_flag_persistence(
+            |acc, val| acc.as_borrowed_mut().unwrap().set_privileged(val),
+            |acc| acc.privileged(),
+            "privileged",
         );
-        // Ensure other flags are unaffected
-        assert!(borrowed.executable());
-        assert!(borrowed.delegated());
-
-        borrowed.set_executable(false);
-        assert!(!borrowed.executable(), "account should be non-executable");
-        assert!(borrowed.delegated(), "delegated flag should remain set");
-        assert!(borrowed.privileged(), "privileged flag should remain set");
     }
 }
