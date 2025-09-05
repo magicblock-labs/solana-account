@@ -454,6 +454,7 @@ impl fmt::Debug for AccountSharedData {
         debug_fmt(self, &mut f);
         f.field("remote_slot", &self.remote_slot());
         f.field("delegated", &self.delegated());
+        f.field("privileged", &self.privileged());
         f.finish()
     }
 }
@@ -641,6 +642,22 @@ impl AccountSharedData {
         }
     }
 
+    /// If this is a borrowed account, returns a reference to it.
+    /// Otherwise returns None.
+    pub fn as_borrowed(&self) -> Option<&AccountBorrowed> {
+        match self {
+            Self::Borrowed(acc) => Some(acc),
+            Self::Owned(_) => None,
+        }
+    }
+
+    pub fn as_borrowed_mut(&mut self) -> Option<&mut AccountBorrowed> {
+        match self {
+            Self::Borrowed(acc) => Some(acc),
+            Self::Owned(_) => None,
+        }
+    }
+
     pub fn set_delegated(&mut self, delegated: bool) {
         match self {
             Self::Owned(acc) => acc.delegated = delegated,
@@ -657,6 +674,15 @@ impl AccountSharedData {
             Self::Borrowed(acc) => acc.flags.is_set(DELEGATED_FLAG_INDEX),
             Self::Owned(acc) => acc.delegated,
         }
+    }
+
+    /// Whether the given account is privileged or not
+    /// **NOTE**: only borrowed accounts can be privileged for security
+    ///  and performance reasons
+    /// Use [Self::as_borrowed_mut] in order to set this flag on the
+    /// borrowed account
+    pub fn privileged(&self) -> bool {
+        self.as_borrowed().is_some_and(AccountBorrowed::privileged)
     }
 
     pub fn remote_slot(&self) -> u64 {
@@ -1134,5 +1160,29 @@ pub mod tests {
         account.set_lamports(remaining);
         account.saturating_sub_lamports(remaining * 2);
         assert_eq!(account.lamports(), 0);
+    }
+
+    #[test]
+    fn test_privileged_flag() {
+        let key = Pubkey::new_unique();
+        let (_, mut account) = make_two_accounts(&key);
+
+        // Test initial state
+        assert!(
+            !account.privileged(),
+            "account should not be privileged by default"
+        );
+
+        // Test setting privileged is impossible on owned account
+        // since we cannot get it as borrowed
+        assert!(account.as_borrowed_mut().is_none());
+
+        // Test that other flags are not affected
+        account.set_delegated(true);
+        account.set_executable(false);
+
+        assert!(!account.privileged(), "privileged flag should remain false");
+        assert!(account.delegated(), "delegated flag should be true");
+        assert!(!account.executable(), "executable flag should be false");
     }
 }
