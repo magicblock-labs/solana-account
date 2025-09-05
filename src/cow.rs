@@ -1026,36 +1026,14 @@ mod tests {
             |acc| acc.delegated(),
             "delegated",
         );
-        assert!(
-            !borrowed.privileged(),
-            "account should not be privileged by default"
+    }
+
+    #[test]
+    fn test_privileged_flag_persistence() {
+        test_flag_persistence(
+            |acc, val| acc.as_borrowed_mut().unwrap().set_privileged(val),
+            |acc| acc.privileged(),
+            "privileged",
         );
-
-        borrowed.set_executable(true);
-        assert!(
-            borrowed.executable(),
-            "account should have become executable"
-        );
-        // Ensure other flags are unaffected
-        assert!(!borrowed.delegated());
-
-        borrowed.set_delegated(true);
-        assert!(borrowed.delegated(), "account should have become delegated");
-        // Ensure other flags are unaffected
-        assert!(borrowed.executable());
-
-        borrowed.as_borrowed_mut().unwrap().set_privileged(true);
-        assert!(
-            borrowed.privileged(),
-            "account should have become privileged"
-        );
-        // Ensure other flags are unaffected
-        assert!(borrowed.executable());
-        assert!(borrowed.delegated());
-
-        borrowed.set_executable(false);
-        assert!(!borrowed.executable(), "account should be non-executable");
-        assert!(borrowed.delegated(), "delegated flag should remain set");
-        assert!(borrowed.privileged(), "privileged flag should remain set");
     }
 }
