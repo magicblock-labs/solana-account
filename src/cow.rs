@@ -713,7 +713,7 @@ mod tests {
         let (buffer, _, mut borrowed) = setup!();
 
         let shadow_switch = buffer.ptr as *const u32;
-        let offset = AccountSharedData::calculate_capacity(buffer.buffer_size() as u32) as isize;
+        let offset = AccountSharedData::calculate_capacity(buffer.buffer_size()) as isize;
         // The start of the primary buffer's fields, after the meta header.
         let primary_buffer_start = unsafe {
             buffer
