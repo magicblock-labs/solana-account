@@ -236,6 +236,16 @@ impl AccountBorrowed {
         // start of the valid memory allocation for this account.
         unsafe { AccountSharedData::deserialize_from_mmap(memptr).into() }
     }
+
+    /// Sets the privileged flag for the account.
+    pub fn set_privileged(&mut self, privileged: bool) {
+        unsafe { self.cow() };
+        self.flags.set(privileged, PRIVILEGED_FLAG_INDEX);
+    }
+
+    pub fn privileged(&self) -> bool {
+        self.flags.is_set(PRIVILEGED_FLAG_INDEX)
+    }
 }
 
 /// A standard, heap-allocated representation of a Solana account.
@@ -259,10 +269,6 @@ pub struct AccountOwned {
     pub(crate) remote_slot: u64,
     /// A flag to track if the account has been delegated.
     pub(crate) delegated: bool,
-    /// A flag to track if the account is privileged.
-    /// It is used to determine if certain checks can be bypassed when this account is
-    /// the signing feepayer of a transaction.
-    pub(crate) privileged: bool,
 }
 
 impl Default for AccountSharedData {
@@ -384,6 +390,9 @@ impl AccountSharedData {
 
     /// Serializes an `AccountOwned` into a memory-mapped region.
     ///
+    /// **NOTE**: since the privileged flag is only supported in [AccountBorrowed], it is
+    /// set to the default value of `false` here.
+    ///
     /// # Safety
     ///
     /// The caller must ensure:
@@ -413,8 +422,7 @@ impl AccountSharedData {
         serializer.write(acc.remote_slot);
         // 6. Flags (bit-packed)
         let flags = (acc.executable as u32) << EXECUTABLE_FLAG_INDEX
-            | (acc.delegated as u32) << DELEGATED_FLAG_INDEX
-            | (acc.privileged as u32) << PRIVILEGED_FLAG_INDEX;
+            | (acc.delegated as u32) << DELEGATED_FLAG_INDEX;
         serializer.write(flags);
         // 7. Data Capacity
         let data_capacity = single_buffer_capacity.saturating_sub(Self::ACCOUNT_STATIC_SIZE);
@@ -997,7 +1005,7 @@ mod tests {
         // Ensure other flags are unaffected
         assert!(borrowed.executable());
 
-        borrowed.set_privileged(true);
+        borrowed.as_borrowed_mut().unwrap().set_privileged(true);
         assert!(
             borrowed.privileged(),
             "account should have become privileged"

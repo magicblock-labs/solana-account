@@ -1,10 +1,7 @@
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 //! The Solana [`Account`] type.
 
-use cow::{
-    AccountBorrowed, AccountOwned, DELEGATED_FLAG_INDEX, EXECUTABLE_FLAG_INDEX,
-    PRIVILEGED_FLAG_INDEX,
-};
+use cow::{AccountBorrowed, AccountOwned, DELEGATED_FLAG_INDEX, EXECUTABLE_FLAG_INDEX};
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
 #[cfg(feature = "serde")]
@@ -174,7 +171,6 @@ impl From<Account> for AccountSharedData {
         Self::Owned(AccountOwned {
             lamports: other.lamports,
             delegated: false,
-            privileged: false,
             data: Arc::new(other.data),
             owner: other.owner,
             executable: other.executable,
@@ -355,7 +351,6 @@ impl WritableAccount for AccountSharedData {
             rent_epoch,
             remote_slot: u64::default(),
             delegated: false,
-            privileged: false,
         })
     }
 }
@@ -633,7 +628,6 @@ impl AccountSharedData {
     pub fn ensure_owned(&mut self) {
         if let Self::Borrowed(acc) = self {
             let delegated = acc.flags.is_set(DELEGATED_FLAG_INDEX);
-            let privileged = acc.flags.is_set(PRIVILEGED_FLAG_INDEX);
             *self = unsafe {
                 Self::Owned(AccountOwned {
                     lamports: *acc.lamports,
@@ -643,9 +637,24 @@ impl AccountSharedData {
                     rent_epoch: Epoch::MAX,
                     remote_slot: *acc.remote_slot,
                     delegated,
-                    privileged,
                 })
             }
+        }
+    }
+
+    /// If this is a borrowed account, returns a reference to it.
+    /// Otherwise returns None.
+    pub fn as_borrowed(&self) -> Option<&AccountBorrowed> {
+        match self {
+            Self::Borrowed(acc) => Some(acc),
+            Self::Owned(_) => None,
+        }
+    }
+
+    pub fn as_borrowed_mut(&mut self) -> Option<&mut AccountBorrowed> {
+        match self {
+            Self::Borrowed(acc) => Some(acc),
+            Self::Owned(_) => None,
         }
     }
 
@@ -667,22 +676,13 @@ impl AccountSharedData {
         }
     }
 
-    pub fn set_privileged(&mut self, privileged: bool) {
-        match self {
-            Self::Owned(acc) => acc.privileged = privileged,
-            Self::Borrowed(acc) => {
-                unsafe { acc.cow() };
-                acc.flags.set(privileged, PRIVILEGED_FLAG_INDEX);
-            }
-        }
-    }
-
     /// Whether the given account is privileged or not
+    /// **NOTE**: only borrowed accounts can be privileged for security
+    ///  and performance reasons
+    /// Use [Self::as_borrowed_mut] in order to set this flag on the
+    /// borrowed account
     pub fn privileged(&self) -> bool {
-        match self {
-            Self::Borrowed(acc) => acc.flags.is_set(PRIVILEGED_FLAG_INDEX),
-            Self::Owned(acc) => acc.privileged,
-        }
+        self.as_borrowed().is_some_and(AccountBorrowed::privileged)
     }
 
     pub fn remote_slot(&self) -> u64 {
@@ -1173,26 +1173,15 @@ pub mod tests {
             "account should not be privileged by default"
         );
 
-        // Test setting privileged to true
-        account.set_privileged(true);
-        assert!(
-            account.privileged(),
-            "account should be privileged after setting to true"
-        );
-
-        // Test setting privileged to false
-        account.set_privileged(false);
-        assert!(
-            !account.privileged(),
-            "account should not be privileged after setting to false"
-        );
+        // Test setting privileged is impossible on owned account
+        // since we cannot get it as borrowed
+        assert!(account.as_borrowed_mut().is_none());
 
         // Test that other flags are not affected
-        account.set_privileged(true);
         account.set_delegated(true);
         account.set_executable(false);
 
-        assert!(account.privileged(), "privileged flag should remain true");
+        assert!(!account.privileged(), "privileged flag should remain false");
         assert!(account.delegated(), "delegated flag should be true");
         assert!(!account.executable(), "executable flag should be false");
     }
