@@ -12,6 +12,9 @@ use solana_sdk_ids::{bpf_loader, bpf_loader_deprecated, bpf_loader_upgradeable, 
 #[cfg(feature = "bincode")]
 use solana_sysvar::Sysvar;
 
+#[cfg(any(test, feature = "dev-context-only-utils"))]
+pub mod test_utils;
+
 use {
     solana_account_info::{debug_account_data::*, AccountInfo},
     solana_clock::{Epoch, INITIAL_RENT_EPOCH},

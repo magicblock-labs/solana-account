@@ -655,46 +655,18 @@ unsafe impl Sync for AccountSeqLock {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::alloc::Layout;
+    use crate::test_utils::create_borrowed_account_shared_data;
 
     const DATA_LEN: u32 = 16384;
-    const ALIGNMENT: u32 = 256;
-    const BUFFER_SIZE: u32 = AccountSharedData::serialized_size_aligned(DATA_LEN, ALIGNMENT);
     const LAMPORTS: u64 = 2342525;
     const SPACE: usize = 2525;
     const OWNER: Pubkey = Pubkey::new_from_array([5; 32]);
 
-    struct BufferArea {
-        ptr: *mut u8,
-        layout: Layout,
-    }
-
-    impl BufferArea {
-        fn new() -> Self {
-            let layout = Layout::from_size_align(BUFFER_SIZE as usize, ALIGNMENT as usize).unwrap();
-            let ptr = unsafe { std::alloc::alloc(layout) };
-            assert!(!ptr.is_null(), "Allocation failed");
-            Self { ptr, layout }
-        }
-    }
-
-    impl Drop for BufferArea {
-        fn drop(&mut self) {
-            unsafe { std::alloc::dealloc(self.ptr, self.layout) };
-        }
-    }
-
     use crate::{accounts_equal, ReadableAccount, WritableAccount};
     macro_rules! setup {
         () => {{
-            let buffer = BufferArea::new();
             let owned = account();
-            let AccountSharedData::Owned(ref acc) = owned else {
-                panic!("invalid AccountSharedData initialization");
-            };
-            unsafe { AccountSharedData::serialize_to_mmap(acc, buffer.ptr, BUFFER_SIZE) };
-            let borrowed = unsafe { AccountSharedData::deserialize_from_mmap(buffer.ptr) };
-            let borrowed = AccountSharedData::Borrowed(borrowed);
+            let (buffer, borrowed) = create_borrowed_account_shared_data(&owned, DATA_LEN);
             (buffer, owned, borrowed)
         }};
     }
@@ -741,7 +713,7 @@ mod tests {
         let (buffer, _, mut borrowed) = setup!();
 
         let shadow_switch = buffer.ptr as *const u32;
-        let offset = AccountSharedData::calculate_capacity(BUFFER_SIZE) as isize;
+        let offset = AccountSharedData::calculate_capacity(buffer.buffer_size()) as isize;
         // The start of the primary buffer's fields, after the meta header.
         let primary_buffer_start = unsafe {
             buffer
