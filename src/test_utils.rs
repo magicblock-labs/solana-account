@@ -12,11 +12,11 @@ pub struct BorrowedAccountBufferArea {
 
 impl BorrowedAccountBufferArea {
     fn new(data_len: u32) -> Self {
-        let layout = Layout::from_size_align(data_len as usize, ALIGNMENT as usize).unwrap();
+        let buffer_size = AccountSharedData::serialized_size_aligned(data_len, ALIGNMENT);
+        let layout = Layout::from_size_align(buffer_size as usize, ALIGNMENT as usize).unwrap();
         let ptr = unsafe { std::alloc::alloc(layout) };
         assert!(!ptr.is_null(), "Allocation failed");
 
-        let buffer_size = AccountSharedData::serialized_size_aligned(data_len, ALIGNMENT);
         Self {
             ptr,
             layout,
