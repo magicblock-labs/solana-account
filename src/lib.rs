@@ -18,6 +18,8 @@ use solana_sysvar::Sysvar;
 #[cfg(any(test, feature = "dev-context-only-utils"))]
 pub mod test_utils;
 
+use crate::cow::BitFlagsOwned;
+
 use {
     solana_account_info::{debug_account_data::*, AccountInfo},
     solana_clock::{Epoch, INITIAL_RENT_EPOCH},
@@ -164,8 +166,8 @@ impl From<AccountSharedData> for Account {
                     lamports: acc.lamports,
                     data: std::mem::take(account_data),
                     owner: acc.owner,
-                    executable: acc.executable,
-                    rent_epoch: acc.rent_epoch,
+                    executable: acc.flags.is_set(EXECUTABLE_FLAG_INDEX),
+                    rent_epoch: Epoch::MAX,
                 }
             }
         }
@@ -174,15 +176,14 @@ impl From<AccountSharedData> for Account {
 
 impl From<Account> for AccountSharedData {
     fn from(other: Account) -> Self {
+        let mut flags = BitFlagsOwned::default();
+        flags.set(other.executable, EXECUTABLE_FLAG_INDEX);
         Self::Owned(AccountOwned {
             lamports: other.lamports,
-            delegated: false,
-            compressed: false,
             data: Arc::new(other.data),
             owner: other.owner,
-            executable: other.executable,
-            rent_epoch: other.rent_epoch,
             remote_slot: u64::default(),
+            flags,
         })
     }
 }
@@ -334,31 +335,27 @@ impl WritableAccount for AccountSharedData {
             Self::Borrowed(acc) => {
                 acc.flags.set(executable, EXECUTABLE_FLAG_INDEX);
             }
-            Self::Owned(acc) => acc.executable = executable,
+            Self::Owned(acc) => acc.flags.set(executable, EXECUTABLE_FLAG_INDEX),
         }
     }
-    fn set_rent_epoch(&mut self, epoch: Epoch) {
-        // noop for Borrowed accounts, as the rent_epoch is not even stored anywhere
-        if let Self::Owned(acc) = self {
-            acc.rent_epoch = epoch
-        }
+    fn set_rent_epoch(&mut self, _: Epoch) {
+        // noop, we just make up rent epoch out of thin air: Epoch::MAX
     }
     fn create(
         lamports: u64,
         data: Vec<u8>,
         owner: Pubkey,
         executable: bool,
-        rent_epoch: Epoch,
+        _rent_epoch: Epoch,
     ) -> Self {
+        let mut flags = BitFlagsOwned::default();
+        flags.set(executable, EXECUTABLE_FLAG_INDEX);
         Self::Owned(AccountOwned {
             lamports,
             data: Arc::new(data),
             owner,
-            executable,
-            rent_epoch,
             remote_slot: u64::default(),
-            delegated: false,
-            compressed: false,
+            flags,
         })
     }
 }
@@ -385,17 +382,13 @@ impl ReadableAccount for AccountSharedData {
     fn executable(&self) -> bool {
         match self {
             Self::Borrowed(acc) => acc.flags.is_set(EXECUTABLE_FLAG_INDEX),
-            Self::Owned(acc) => acc.executable,
+            Self::Owned(acc) => acc.flags.is_set(EXECUTABLE_FLAG_INDEX),
         }
     }
     fn rent_epoch(&self) -> Epoch {
-        match self {
-            Self::Borrowed(_) => Epoch::MAX,
-            Self::Owned(acc) => acc.rent_epoch,
-        }
+        Epoch::MAX
     }
     fn to_account_shared_data(&self) -> AccountSharedData {
-        // avoid data copy here
         self.clone()
     }
 }
@@ -474,7 +467,7 @@ fn shared_new<T: WritableAccount>(lamports: u64, space: usize, owner: &Pubkey) -
         vec![0u8; space],
         *owner,
         bool::default(),
-        Epoch::default(),
+        Epoch::MAX,
     )
 }
 
@@ -636,18 +629,13 @@ impl AccountSharedData {
 
     pub fn ensure_owned(&mut self) {
         if let Self::Borrowed(acc) = self {
-            let delegated = acc.flags.is_set(DELEGATED_FLAG_INDEX);
-            let compressed = acc.flags.is_set(COMPRESSED_FLAG_INDEX);
             *self = unsafe {
                 Self::Owned(AccountOwned {
                     lamports: *acc.lamports,
                     data: Arc::new((*acc.data).to_vec()),
                     owner: *acc.owner,
-                    executable: acc.flags.is_set(EXECUTABLE_FLAG_INDEX),
-                    rent_epoch: Epoch::MAX,
                     remote_slot: *acc.remote_slot,
-                    delegated,
-                    compressed,
+                    flags: acc.flags.into(),
                 })
             }
         }
@@ -671,7 +659,7 @@ impl AccountSharedData {
 
     pub fn set_delegated(&mut self, delegated: bool) {
         match self {
-            Self::Owned(acc) => acc.delegated = delegated,
+            Self::Owned(acc) => acc.flags.set(delegated, DELEGATED_FLAG_INDEX),
             Self::Borrowed(acc) => {
                 unsafe { acc.cow() };
                 acc.flags.set(delegated, DELEGATED_FLAG_INDEX);
@@ -683,14 +671,14 @@ impl AccountSharedData {
     pub fn delegated(&self) -> bool {
         match self {
             Self::Borrowed(acc) => acc.flags.is_set(DELEGATED_FLAG_INDEX),
-            Self::Owned(acc) => acc.delegated,
+            Self::Owned(acc) => acc.flags.is_set(DELEGATED_FLAG_INDEX),
         }
     }
 
     /// Sets the compressed flag for the account
     pub fn set_compressed(&mut self, compressed: bool) {
         match self {
-            Self::Owned(acc) => acc.compressed = compressed,
+            Self::Owned(acc) => acc.flags.set(compressed, COMPRESSED_FLAG_INDEX),
             Self::Borrowed(acc) => {
                 unsafe { acc.cow() };
                 acc.flags.set(compressed, COMPRESSED_FLAG_INDEX);
@@ -702,7 +690,7 @@ impl AccountSharedData {
     pub fn compressed(&self) -> bool {
         match self {
             Self::Borrowed(acc) => acc.flags.is_set(COMPRESSED_FLAG_INDEX),
-            Self::Owned(acc) => acc.compressed,
+            Self::Owned(acc) => acc.flags.is_set(COMPRESSED_FLAG_INDEX),
         }
     }
 
@@ -1039,7 +1027,6 @@ pub mod tests {
     fn make_two_accounts(key: &Pubkey) -> (Account, AccountSharedData) {
         let mut account1 = Account::new(1, 2, key);
         account1.executable = true;
-        account1.rent_epoch = 4;
         let account2 = AccountSharedData::from(account1.clone());
         assert!(accounts_equal(&account1, &account2));
         (account1, account2)
@@ -1113,14 +1100,11 @@ pub mod tests {
         assert_eq!(account.owner(), &key);
         assert!(account.executable);
         assert!(account.executable());
-        assert_eq!(account.rent_epoch, 4);
-        assert_eq!(account.rent_epoch(), 4);
         let account = account2;
         assert_eq!(account.lamports(), 1);
         assert_eq!(account.data().len(), 2);
         assert_eq!(account.owner(), &key);
         assert!(account.executable());
-        assert_eq!(account.rent_epoch(), 4);
     }
 
     #[test]
