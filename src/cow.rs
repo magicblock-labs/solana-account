@@ -78,6 +78,7 @@ const RELATIVE_DATA_CAP_POINTER_OFFSET: isize = -8;
 pub(crate) const EXECUTABLE_FLAG_INDEX: u32 = 0;
 pub(crate) const DELEGATED_FLAG_INDEX: u32 = 1;
 pub(crate) const PRIVILEGED_FLAG_INDEX: u32 = 2;
+pub(crate) const COMPRESSED_FLAG_INDEX: u32 = 3;
 
 // --- Memory Layout Offsets ---
 // NOTE: These constants define the memory layout of a serialized account and must
@@ -120,6 +121,7 @@ pub struct AccountBorrowed {
     /// Flags include:
     /// - `0`: `executable`
     /// - `1`: `delegated`
+    /// - `3`: `compressed`
     pub(crate) flags: BitFlags,
 }
 
@@ -269,6 +271,8 @@ pub struct AccountOwned {
     pub(crate) remote_slot: u64,
     /// A flag to track if the account has been delegated.
     pub(crate) delegated: bool,
+    /// A flag to track if the account data is compressed.
+    pub(crate) compressed: bool,
 }
 
 impl Default for AccountSharedData {
@@ -422,7 +426,8 @@ impl AccountSharedData {
         serializer.write(acc.remote_slot);
         // 6. Flags (bit-packed)
         let flags = (acc.executable as u32) << EXECUTABLE_FLAG_INDEX
-            | (acc.delegated as u32) << DELEGATED_FLAG_INDEX;
+            | (acc.delegated as u32) << DELEGATED_FLAG_INDEX
+            | (acc.compressed as u32) << COMPRESSED_FLAG_INDEX;
         serializer.write(flags);
         // 7. Data Capacity
         let data_capacity = single_buffer_capacity.saturating_sub(Self::ACCOUNT_STATIC_SIZE);
@@ -957,7 +962,7 @@ mod tests {
         let (buffer, _, mut acc) = setup!();
 
         // Check initial state, set to true, and verify persistence.
-        assert!(!get(&acc), "'{}' should be false initially", name);
+        assert!(!get(&acc), "'{name}' should be false initially");
         set(&mut acc, true);
         if let AccountSharedData::Borrowed(b) = &acc {
             b.commit();
@@ -965,7 +970,7 @@ mod tests {
         let mut acc_after_set = AccountSharedData::from(unsafe {
             AccountSharedData::deserialize_from_mmap(buffer.ptr)
         });
-        assert!(get(&acc_after_set), "'{}' should be true after set", name);
+        assert!(get(&acc_after_set), "'{name}' should be true after set");
 
         // Set back to false and verify persistence.
         set(&mut acc_after_set, false);
@@ -975,11 +980,7 @@ mod tests {
         let acc_after_clear = AccountSharedData::from(unsafe {
             AccountSharedData::deserialize_from_mmap(buffer.ptr)
         });
-        assert!(
-            !get(&acc_after_clear),
-            "'{}' should be false after clear",
-            name
-        );
+        assert!(!get(&acc_after_clear), "'{name}' should be false after clear");
     }
 
     #[test]
@@ -1006,6 +1007,15 @@ mod tests {
             |acc, val| acc.as_borrowed_mut().unwrap().set_privileged(val),
             |acc| acc.privileged(),
             "privileged",
+        );
+    }
+
+    #[test]
+    fn test_compressed_flag_persistence() {
+        test_flag_persistence(
+            |acc, val| acc.set_compressed(val),
+            |acc| acc.compressed(),
+            "compressed",
         );
     }
 }

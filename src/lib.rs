@@ -1,7 +1,7 @@
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 //! The Solana [`Account`] type.
 
-use cow::{AccountBorrowed, AccountOwned, DELEGATED_FLAG_INDEX, EXECUTABLE_FLAG_INDEX};
+use cow::{AccountBorrowed, AccountOwned, COMPRESSED_FLAG_INDEX, DELEGATED_FLAG_INDEX, EXECUTABLE_FLAG_INDEX};
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
 #[cfg(feature = "serde")]
@@ -174,6 +174,7 @@ impl From<Account> for AccountSharedData {
         Self::Owned(AccountOwned {
             lamports: other.lamports,
             delegated: false,
+            compressed: false,
             data: Arc::new(other.data),
             owner: other.owner,
             executable: other.executable,
@@ -354,6 +355,7 @@ impl WritableAccount for AccountSharedData {
             rent_epoch,
             remote_slot: u64::default(),
             delegated: false,
+            compressed: false,
         })
     }
 }
@@ -457,6 +459,7 @@ impl fmt::Debug for AccountSharedData {
         debug_fmt(self, &mut f);
         f.field("remote_slot", &self.remote_slot());
         f.field("delegated", &self.delegated());
+        f.field("compressed", &self.compressed());
         f.field("privileged", &self.privileged());
         f.finish()
     }
@@ -631,6 +634,7 @@ impl AccountSharedData {
     pub fn ensure_owned(&mut self) {
         if let Self::Borrowed(acc) = self {
             let delegated = acc.flags.is_set(DELEGATED_FLAG_INDEX);
+            let compressed = acc.flags.is_set(COMPRESSED_FLAG_INDEX);
             *self = unsafe {
                 Self::Owned(AccountOwned {
                     lamports: *acc.lamports,
@@ -640,6 +644,7 @@ impl AccountSharedData {
                     rent_epoch: Epoch::MAX,
                     remote_slot: *acc.remote_slot,
                     delegated,
+                    compressed,
                 })
             }
         }
@@ -676,6 +681,25 @@ impl AccountSharedData {
         match self {
             Self::Borrowed(acc) => acc.flags.is_set(DELEGATED_FLAG_INDEX),
             Self::Owned(acc) => acc.delegated,
+        }
+    }
+
+    /// Sets the compressed flag for the account
+    pub fn set_compressed(&mut self, compressed: bool) {
+        match self {
+            Self::Owned(acc) => acc.compressed = compressed,
+            Self::Borrowed(acc) => {
+                unsafe { acc.cow() };
+                acc.flags.set(compressed, COMPRESSED_FLAG_INDEX);
+            }
+        }
+    }
+
+    /// Whether the given account is compressed or not
+    pub fn compressed(&self) -> bool {
+        match self {
+            Self::Borrowed(acc) => acc.flags.is_set(COMPRESSED_FLAG_INDEX),
+            Self::Owned(acc) => acc.compressed,
         }
     }
 
@@ -1183,9 +1207,40 @@ pub mod tests {
         // Test that other flags are not affected
         account.set_delegated(true);
         account.set_executable(false);
+        account.set_compressed(true);
 
         assert!(!account.privileged(), "privileged flag should remain false");
         assert!(account.delegated(), "delegated flag should be true");
         assert!(!account.executable(), "executable flag should be false");
+        assert!(account.compressed(), "compressed flag should be true");
+    }
+
+    #[test]
+    fn test_compressed_flag() {
+        let key = Pubkey::new_unique();
+        let (_, mut account) = make_two_accounts(&key);
+
+        // Test initial state
+        assert!(
+            !account.compressed(),
+            "account should not be compressed by default"
+        );
+
+        // Test setting compressed to true
+        account.set_compressed(true);
+        assert!(account.compressed(), "compressed flag should be true");
+
+        // Test setting compressed to false
+        account.set_compressed(false);
+        assert!(!account.compressed(), "compressed flag should be false");
+
+        // Test that other flags are not affected when setting compressed
+        account.set_delegated(true);
+        account.set_executable(true);
+        account.set_compressed(true);
+
+        assert!(account.delegated(), "delegated flag should remain true");
+        assert!(account.executable(), "executable flag should remain true");
+        assert!(account.compressed(), "compressed flag should be true");
     }
 }
