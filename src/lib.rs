@@ -1,7 +1,10 @@
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 //! The Solana [`Account`] type.
 
-use cow::{AccountBorrowed, AccountOwned, COMPRESSED_FLAG_INDEX, DELEGATED_FLAG_INDEX, EXECUTABLE_FLAG_INDEX};
+use cow::{
+    AccountBorrowed, AccountOwned, COMPRESSED_FLAG_INDEX, DELEGATED_FLAG_INDEX,
+    EXECUTABLE_FLAG_INDEX,
+};
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
 #[cfg(feature = "serde")]

@@ -980,7 +980,10 @@ mod tests {
         let acc_after_clear = AccountSharedData::from(unsafe {
             AccountSharedData::deserialize_from_mmap(buffer.ptr)
         });
-        assert!(!get(&acc_after_clear), "'{name}' should be false after clear");
+        assert!(
+            !get(&acc_after_clear),
+            "'{name}' should be false after clear"
+        );
     }
 
     #[test]
