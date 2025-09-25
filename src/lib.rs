@@ -698,7 +698,7 @@ impl AccountSharedData {
         }
     }
 
-    /// Whether the given account is compressed or not
+    /// Whether the given account is compressed on chain
     pub fn compressed(&self) -> bool {
         match self {
             Self::Borrowed(acc) => acc.flags.is_set(COMPRESSED_FLAG_INDEX),

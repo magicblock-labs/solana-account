@@ -271,7 +271,7 @@ pub struct AccountOwned {
     pub(crate) remote_slot: u64,
     /// A flag to track if the account has been delegated.
     pub(crate) delegated: bool,
-    /// A flag to track if the account data is compressed.
+    /// A flag to track if the account data is compressed on chain.
     pub(crate) compressed: bool,
 }
 
