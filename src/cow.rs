@@ -60,7 +60,6 @@ use std::{
     },
 };
 
-use solana_clock::Epoch;
 use solana_pubkey::Pubkey;
 
 use crate::AccountSharedData;
@@ -121,13 +120,26 @@ pub struct AccountBorrowed {
     /// Flags include:
     /// - `0`: `executable`
     /// - `1`: `delegated`
+    /// - `2`: `privileged`
     /// - `3`: `compressed`
     pub(crate) flags: BitFlags,
 }
 
 /// A wrapper for a raw pointer to a `u32` used for bit-packed flags.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BitFlags(*mut u32);
+
+/// A wrapper for a `u8` used for bit-packed flags.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct BitFlagsOwned(u8);
+
+impl From<BitFlags> for BitFlagsOwned {
+    fn from(val: BitFlags) -> Self {
+        // SAFETY:
+        // *mut u32 in BitFlags is alwasy properly initialized
+        Self(unsafe { *val.0 } as u8)
+    }
+}
 
 impl From<AccountBorrowed> for AccountSharedData {
     fn from(value: AccountBorrowed) -> Self {
@@ -263,16 +275,14 @@ pub struct AccountOwned {
     pub(crate) data: Arc<Vec<u8>>,
     /// The program that owns this account.
     pub(crate) owner: Pubkey,
-    /// Whether this account's data contains a loaded program.
-    pub(crate) executable: bool,
-    /// The epoch at which this account will next owe rent.
-    pub(crate) rent_epoch: Epoch,
     /// Remote slot number.
     pub(crate) remote_slot: u64,
-    /// A flag to track if the account has been delegated.
-    pub(crate) delegated: bool,
-    /// A flag to track if the account data is compressed on chain.
-    pub(crate) compressed: bool,
+    /// Various boolean flags (bit packed)
+    /// 0. executable
+    /// 1. delegated
+    /// 2. privileged (inaccessable)
+    /// 3. compressed
+    pub(crate) flags: BitFlagsOwned,
 }
 
 impl Default for AccountSharedData {
@@ -425,9 +435,7 @@ impl AccountSharedData {
         // 5. Remote Slot
         serializer.write(acc.remote_slot);
         // 6. Flags (bit-packed)
-        let flags = (acc.executable as u32) << EXECUTABLE_FLAG_INDEX
-            | (acc.delegated as u32) << DELEGATED_FLAG_INDEX
-            | (acc.compressed as u32) << COMPRESSED_FLAG_INDEX;
+        let flags = acc.flags.0 as u32;
         serializer.write(flags);
         // 7. Data Capacity
         let data_capacity = single_buffer_capacity.saturating_sub(Self::ACCOUNT_STATIC_SIZE);
@@ -534,6 +542,22 @@ impl BitFlags {
         // SAFETY: This is only called during CoW, where `offset` is a valid
         // distance to the corresponding field in the shadow buffer.
         self.0 = unsafe { (self.0 as *mut u8).offset(offset) as *mut u32 };
+    }
+}
+
+impl BitFlagsOwned {
+    /// Checks if the bit at `index` is set.
+    pub(crate) fn is_set(&self, index: u32) -> bool {
+        (self.0 >> index) & 1 == 1
+    }
+
+    /// Sets or clears the bit at `index`.
+    pub(crate) fn set(&mut self, val: bool, index: u32) {
+        if val {
+            self.0 |= 1 << index;
+        } else {
+            self.0 &= !(1 << index);
+        }
     }
 }
 
@@ -659,6 +683,8 @@ unsafe impl Sync for AccountSeqLock {}
 
 #[cfg(test)]
 mod tests {
+    use solana_clock::Epoch;
+
     use super::*;
     use crate::test_utils::create_borrowed_account_shared_data;
 
