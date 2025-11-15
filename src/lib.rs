@@ -301,18 +301,26 @@ impl WritableAccount for AccountSharedData {
     fn set_lamports(&mut self, lamports: u64) {
         match self {
             Self::Borrowed(acc) => unsafe {
+                if *acc.lamports == lamports {
+                    return;
+                }
                 acc.cow();
                 *acc.lamports = lamports;
             },
             Self::Owned(acc) => acc.lamports = lamports,
         }
     }
+
     fn data_as_mut_slice(&mut self) -> &mut [u8] {
         self.data_mut()
     }
+
     fn set_owner(&mut self, owner: Pubkey) {
         match self {
             Self::Borrowed(acc) => unsafe {
+                if *acc.owner == owner {
+                    return;
+                }
                 acc.cow();
                 acc.owner_changed = *acc.owner != owner;
                 *acc.owner = owner;
@@ -320,9 +328,13 @@ impl WritableAccount for AccountSharedData {
             Self::Owned(acc) => acc.owner = owner,
         }
     }
+
     fn copy_into_owner_from_slice(&mut self, source: &[u8]) {
         match self {
             Self::Borrowed(acc) => unsafe {
+                if (*acc.owner).as_array() == source {
+                    return;
+                }
                 acc.cow();
                 (acc.owner as *mut u8)
                     .copy_from_nonoverlapping(source.as_ptr(), size_of::<Pubkey>());
@@ -330,17 +342,25 @@ impl WritableAccount for AccountSharedData {
             Self::Owned(acc) => acc.owner.as_mut().copy_from_slice(source),
         }
     }
+
     fn set_executable(&mut self, executable: bool) {
         match self {
             Self::Borrowed(acc) => {
+                if acc.flags.is_set(EXECUTABLE_FLAG_INDEX) == executable {
+                    return;
+                }
+                unsafe { acc.cow() };
+
                 acc.flags.set(executable, EXECUTABLE_FLAG_INDEX);
             }
             Self::Owned(acc) => acc.flags.set(executable, EXECUTABLE_FLAG_INDEX),
         }
     }
+
     fn set_rent_epoch(&mut self, _: Epoch) {
         // noop, we just make up rent epoch out of thin air: Epoch::MAX
     }
+
     fn create(
         lamports: u64,
         data: Vec<u8>,
@@ -799,6 +819,9 @@ impl AccountSharedData {
                 // we just initialized the data and made sure that
                 // new_len doesn't exceed the available capacity
                 unsafe {
+                    if acc.data.as_ref() == new_data {
+                        return;
+                    }
                     acc.cow();
                     acc.data.ptr.copy_from_nonoverlapping(new_ptr, new_len);
                     acc.data.set_len(new_len);
@@ -851,6 +874,9 @@ impl AccountSharedData {
             // we are initializing the data and we made sure that
             // data.len() doesn't exceed the available capacity
             unsafe {
+                if acc.data.as_ref() == data.as_slice() {
+                    return;
+                }
                 acc.cow();
                 acc.data
                     .ptr
