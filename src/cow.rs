@@ -78,6 +78,7 @@ pub(crate) const EXECUTABLE_FLAG_INDEX: u32 = 0;
 pub(crate) const DELEGATED_FLAG_INDEX: u32 = 1;
 pub(crate) const PRIVILEGED_FLAG_INDEX: u32 = 2;
 pub(crate) const COMPRESSED_FLAG_INDEX: u32 = 3;
+pub(crate) const UNDELEGATING_FLAG_INDEX: u32 = 4;
 
 // --- Memory Layout Offsets ---
 // NOTE: These constants define the memory layout of a serialized account and must
@@ -122,6 +123,7 @@ pub struct AccountBorrowed {
     /// - `1`: `delegated`
     /// - `2`: `privileged`
     /// - `3`: `compressed`
+    /// - `4`: `undelegating`
     pub(crate) flags: BitFlags,
 }
 
@@ -282,6 +284,7 @@ pub struct AccountOwned {
     /// 1. delegated
     /// 2. privileged (inaccessable)
     /// 3. compressed
+    /// 4. undelegating
     pub(crate) flags: BitFlagsOwned,
 }
 
@@ -1045,6 +1048,15 @@ mod tests {
             |acc, val| acc.set_compressed(val),
             |acc| acc.compressed(),
             "compressed",
+        );
+    }
+
+    #[test]
+    fn test_undelegating_flag_persistence() {
+        test_flag_persistence(
+            |acc, val| acc.set_undelegating(val),
+            |acc| acc.undelegating(),
+            "undelegating",
         );
     }
 }
