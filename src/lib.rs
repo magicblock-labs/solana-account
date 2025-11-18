@@ -3,7 +3,7 @@
 
 use cow::{
     AccountBorrowed, AccountOwned, COMPRESSED_FLAG_INDEX, DELEGATED_FLAG_INDEX,
-    EXECUTABLE_FLAG_INDEX,
+    EXECUTABLE_FLAG_INDEX, UNDELEGATING_FLAG_INDEX,
 };
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
@@ -332,9 +332,10 @@ impl WritableAccount for AccountSharedData {
     }
     fn set_executable(&mut self, executable: bool) {
         match self {
-            Self::Borrowed(acc) => {
+            Self::Borrowed(acc) => unsafe {
+                acc.cow();
                 acc.flags.set(executable, EXECUTABLE_FLAG_INDEX);
-            }
+            },
             Self::Owned(acc) => acc.flags.set(executable, EXECUTABLE_FLAG_INDEX),
         }
     }
@@ -456,6 +457,7 @@ impl fmt::Debug for AccountSharedData {
         f.field("remote_slot", &self.remote_slot());
         f.field("delegated", &self.delegated());
         f.field("compressed", &self.compressed());
+        f.field("undelegating", &self.undelegating());
         f.field("privileged", &self.privileged());
         f.finish()
     }
@@ -694,6 +696,25 @@ impl AccountSharedData {
         }
     }
 
+    /// Sets the undelegating flag for the account
+    pub fn set_undelegating(&mut self, undelegating: bool) {
+        match self {
+            Self::Owned(acc) => acc.flags.set(undelegating, UNDELEGATING_FLAG_INDEX),
+            Self::Borrowed(acc) => {
+                unsafe { acc.cow() };
+                acc.flags.set(undelegating, UNDELEGATING_FLAG_INDEX);
+            }
+        }
+    }
+
+    /// Whether the given account is undelegating
+    pub fn undelegating(&self) -> bool {
+        match self {
+            Self::Borrowed(acc) => acc.flags.is_set(UNDELEGATING_FLAG_INDEX),
+            Self::Owned(acc) => acc.flags.is_set(UNDELEGATING_FLAG_INDEX),
+        }
+    }
+
     /// Whether the given account is privileged or not
     /// **NOTE**: only borrowed accounts can be privileged for security
     ///  and performance reasons
@@ -775,7 +796,10 @@ impl AccountSharedData {
                 //
                 // Safety: we made sure that new_len doesn't exceed
                 // the old one and old data is already initialized
-                unsafe { acc.data.set_len(new_len) };
+                unsafe {
+                    acc.cow();
+                    acc.data.set_len(new_len);
+                }
             }
         }
     }
@@ -869,6 +893,7 @@ impl AccountSharedData {
     pub fn spare_data_capacity_mut(&mut self) -> &mut [MaybeUninit<u8>] {
         match self {
             Self::Borrowed(acc) => unsafe {
+                acc.cow();
                 let ptr = acc.data.ptr.add(acc.data.len as usize) as *mut MaybeUninit<u8>;
                 std::slice::from_raw_parts_mut(
                     ptr,
@@ -1229,5 +1254,36 @@ pub mod tests {
         assert!(account.delegated(), "delegated flag should remain true");
         assert!(account.executable(), "executable flag should remain true");
         assert!(account.compressed(), "compressed flag should be true");
+    }
+
+    #[test]
+    fn test_undelegating_flag() {
+        let key = Pubkey::new_unique();
+        let (_, mut account) = make_two_accounts(&key);
+
+        // Test initial state
+        assert!(
+            !account.undelegating(),
+            "account should not be undelegating by default"
+        );
+
+        // Test setting undelegating to true
+        account.set_undelegating(true);
+        assert!(account.undelegating(), "undelegating flag should be true");
+
+        // Test setting undelegating to false
+        account.set_undelegating(false);
+        assert!(!account.undelegating(), "undelegating flag should be false");
+
+        // Test that other flags are not affected when setting undelegating
+        account.set_delegated(true);
+        account.set_executable(true);
+        account.set_compressed(true);
+        account.set_undelegating(true);
+
+        assert!(account.delegated(), "delegated flag should remain true");
+        assert!(account.executable(), "executable flag should remain true");
+        assert!(account.compressed(), "compressed flag should remain true");
+        assert!(account.undelegating(), "undelegating flag should be true");
     }
 }
