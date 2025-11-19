@@ -352,7 +352,7 @@ impl WritableAccount for AccountSharedData {
                 unsafe { acc.cow() };
 
                 acc.flags.set(executable, EXECUTABLE_FLAG_INDEX);
-            },
+            }
             Self::Owned(acc) => acc.flags.set(executable, EXECUTABLE_FLAG_INDEX),
         }
     }
@@ -680,8 +680,16 @@ impl AccountSharedData {
 
     pub fn set_delegated(&mut self, delegated: bool) {
         match self {
-            Self::Owned(acc) => acc.flags.set(delegated, DELEGATED_FLAG_INDEX),
+            Self::Owned(acc) => {
+                if acc.flags.is_set(DELEGATED_FLAG_INDEX) == delegated {
+                    return;
+                }
+                acc.flags.set(delegated, DELEGATED_FLAG_INDEX);
+            }
             Self::Borrowed(acc) => {
+                if acc.flags.is_set(DELEGATED_FLAG_INDEX) == delegated {
+                    return;
+                }
                 unsafe { acc.cow() };
                 acc.flags.set(delegated, DELEGATED_FLAG_INDEX);
             }
@@ -699,8 +707,16 @@ impl AccountSharedData {
     /// Sets the compressed flag for the account
     pub fn set_compressed(&mut self, compressed: bool) {
         match self {
-            Self::Owned(acc) => acc.flags.set(compressed, COMPRESSED_FLAG_INDEX),
+            Self::Owned(acc) => {
+                if acc.flags.is_set(COMPRESSED_FLAG_INDEX) == compressed {
+                    return;
+                }
+                acc.flags.set(compressed, COMPRESSED_FLAG_INDEX);
+            }
             Self::Borrowed(acc) => {
+                if acc.flags.is_set(COMPRESSED_FLAG_INDEX) == compressed {
+                    return;
+                }
                 unsafe { acc.cow() };
                 acc.flags.set(compressed, COMPRESSED_FLAG_INDEX);
             }
@@ -718,8 +734,16 @@ impl AccountSharedData {
     /// Sets the undelegating flag for the account
     pub fn set_undelegating(&mut self, undelegating: bool) {
         match self {
-            Self::Owned(acc) => acc.flags.set(undelegating, UNDELEGATING_FLAG_INDEX),
+            Self::Owned(acc) => {
+                if acc.flags.is_set(UNDELEGATING_FLAG_INDEX) == undelegating {
+                    return;
+                }
+                acc.flags.set(undelegating, UNDELEGATING_FLAG_INDEX);
+            }
             Self::Borrowed(acc) => {
+                if acc.flags.is_set(UNDELEGATING_FLAG_INDEX) == undelegating {
+                    return;
+                }
                 unsafe { acc.cow() };
                 acc.flags.set(undelegating, UNDELEGATING_FLAG_INDEX);
             }
