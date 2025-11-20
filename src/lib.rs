@@ -866,9 +866,6 @@ impl AccountSharedData {
                 // we just initialized the data and made sure that
                 // new_len doesn't exceed the available capacity
                 unsafe {
-                    if acc.data.as_ref() == new_data {
-                        return;
-                    }
                     acc.cow();
                     acc.data.ptr.copy_from_nonoverlapping(new_ptr, new_len);
                     acc.data.set_len(new_len);
@@ -921,9 +918,6 @@ impl AccountSharedData {
             // we are initializing the data and we made sure that
             // data.len() doesn't exceed the available capacity
             unsafe {
-                if acc.data.as_ref() == data.as_slice() {
-                    return;
-                }
                 acc.cow();
                 acc.data
                     .ptr
