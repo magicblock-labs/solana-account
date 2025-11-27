@@ -2,8 +2,8 @@
 //! The Solana [`Account`] type.
 
 use cow::{
-    AccountBorrowed, AccountOwned, COMPRESSED_FLAG_INDEX, DELEGATED_FLAG_INDEX,
-    EXECUTABLE_FLAG_INDEX, UNDELEGATING_FLAG_INDEX,
+    AccountBorrowed, AccountOwned, COMPRESSED_FLAG_INDEX, CONFINED_FLAG_INDEX,
+    DELEGATED_FLAG_INDEX, EXECUTABLE_FLAG_INDEX, UNDELEGATING_FLAG_INDEX,
 };
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
@@ -477,6 +477,7 @@ impl fmt::Debug for AccountSharedData {
         f.field("delegated", &self.delegated());
         f.field("compressed", &self.compressed());
         f.field("undelegating", &self.undelegating());
+        f.field("confined", &self.confined());
         f.field("privileged", &self.privileged());
         f.finish()
     }
@@ -755,6 +756,34 @@ impl AccountSharedData {
         match self {
             Self::Borrowed(acc) => acc.flags.is_set(UNDELEGATING_FLAG_INDEX),
             Self::Owned(acc) => acc.flags.is_set(UNDELEGATING_FLAG_INDEX),
+        }
+    }
+
+    /// Sets the [Self::confined] flag for the account
+    pub fn set_confined(&mut self, confined: bool) {
+        match self {
+            Self::Owned(acc) => {
+                if acc.flags.is_set(CONFINED_FLAG_INDEX) == confined {
+                    return;
+                }
+                acc.flags.set(confined, CONFINED_FLAG_INDEX);
+            }
+            Self::Borrowed(acc) => {
+                if acc.flags.is_set(CONFINED_FLAG_INDEX) == confined {
+                    return;
+                }
+                unsafe { acc.cow() };
+                acc.flags.set(confined, CONFINED_FLAG_INDEX);
+            }
+        }
+    }
+
+    /// Whether the given account is confined which means its usage is limited.
+    /// For instance we cannot change the lamports or data size of such an account.
+    pub fn confined(&self) -> bool {
+        match self {
+            Self::Borrowed(acc) => acc.flags.is_set(CONFINED_FLAG_INDEX),
+            Self::Owned(acc) => acc.flags.is_set(CONFINED_FLAG_INDEX),
         }
     }
 
@@ -1328,5 +1357,41 @@ pub mod tests {
         assert!(account.executable(), "executable flag should remain true");
         assert!(account.compressed(), "compressed flag should remain true");
         assert!(account.undelegating(), "undelegating flag should be true");
+    }
+
+    #[test]
+    fn test_confined_flag() {
+        let key = Pubkey::new_unique();
+        let (_, mut account) = make_two_accounts(&key);
+
+        // Test initial state
+        assert!(
+            !account.confined(),
+            "account should not be confined by default"
+        );
+
+        // Test setting confined to true
+        account.set_confined(true);
+        assert!(account.confined(), "confined flag should be true");
+
+        // Test setting confined to false
+        account.set_confined(false);
+        assert!(!account.confined(), "confined flag should be false");
+
+        // Test that other flags are not affected when setting confined
+        account.set_delegated(true);
+        account.set_executable(true);
+        account.set_compressed(true);
+        account.set_undelegating(true);
+        account.set_confined(true);
+
+        assert!(account.delegated(), "delegated flag should remain true");
+        assert!(account.executable(), "executable flag should remain true");
+        assert!(account.compressed(), "compressed flag should remain true");
+        assert!(
+            account.undelegating(),
+            "undelegating flag should remain true"
+        );
+        assert!(account.confined(), "confined flag should be true");
     }
 }
