@@ -18,7 +18,7 @@ use solana_sysvar::Sysvar;
 #[cfg(any(test, feature = "dev-context-only-utils"))]
 pub mod test_utils;
 
-use crate::cow::BitFlagsOwned;
+use crate::cow::{BitFlagsOwned, LAMPORTS_CHANGED_MARKER_INDEX, OWNER_CHANGED_MARKER_INDEX};
 
 use {
     solana_account_info::{debug_account_data::*, AccountInfo},
@@ -305,6 +305,7 @@ impl WritableAccount for AccountSharedData {
                     return;
                 }
                 acc.cow();
+                acc.markers.set(true, LAMPORTS_CHANGED_MARKER_INDEX);
                 *acc.lamports = lamports;
             },
             Self::Owned(acc) => acc.lamports = lamports,
@@ -322,7 +323,7 @@ impl WritableAccount for AccountSharedData {
                     return;
                 }
                 acc.cow();
-                acc.owner_changed = *acc.owner != owner;
+                acc.markers.set(true, OWNER_CHANGED_MARKER_INDEX);
                 *acc.owner = owner;
             },
             Self::Owned(acc) => acc.owner = owner,
