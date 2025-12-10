@@ -81,6 +81,11 @@ pub(crate) const COMPRESSED_FLAG_INDEX: u32 = 3;
 pub(crate) const UNDELEGATING_FLAG_INDEX: u32 = 4;
 pub(crate) const CONFINED_FLAG_INDEX: u32 = 5;
 
+// --- Ephemeral marker bit indices ---
+pub(crate) const IS_DIRTY_MARKER_INDEX: u32 = 0;
+pub(crate) const OWNER_CHANGED_MARKER_INDEX: u32 = 1;
+pub(crate) const LAMPORTS_CHANGED_MARKER_INDEX: u32 = 2;
+
 // --- Memory Layout Offsets ---
 // NOTE: These constants define the memory layout of a serialized account and must
 // be kept in sync with the `serialize_to_mmap` and `deserialize_from_mmap` functions.
@@ -114,10 +119,6 @@ pub struct AccountBorrowed {
     pub(crate) owner: *mut Pubkey,
     /// A raw pointer to the remote slot number (`u64`).
     pub(crate) remote_slot: *mut u64,
-    /// A flag indicating if the account's owner has been changed.
-    pub owner_changed: bool,
-    /// A flag indicating if any field in the account has been modified.
-    pub is_dirty: bool,
     /// A wrapper around a raw pointer to the bit-packed flags field (`u32`).
     /// Flags include:
     /// - `0`: `executable`
@@ -127,6 +128,12 @@ pub struct AccountBorrowed {
     /// - `4`: `undelegating`
     /// - `5`: `confined`
     pub(crate) flags: BitFlags,
+    /// A collection of not persisted (ephemeral) boolean markers,
+    /// indicating a runtime specific account state transitions
+    /// - `0`: `is dirty`
+    /// - `1`: `owner changed`
+    /// - `2`: `lamports changed`
+    pub(crate) markers: BitFlagsOwned,
 }
 
 /// A wrapper for a raw pointer to a `u32` used for bit-packed flags.
@@ -161,22 +168,24 @@ unsafe impl Send for AccountBorrowed {}
 unsafe impl Sync for AccountBorrowed {}
 
 impl AccountBorrowed {
-    /// Performs a Copy-on-Write (CoW) by copying the active account buffer to its shadow buffer.
+    /// Performs a Copy-on-Write (CoW) by copying the
+    /// active account buffer to its shadow buffer.
     ///
-    /// After the copy, all internal pointers are updated to point to the new shadow buffer.
-    /// This function is idempotent; it does nothing if a CoW has already occurred (i.e.,
-    /// `shadow_offset` is 0).
+    /// After the copy, all internal pointers are updated to point to the
+    /// new shadow buffer. This function is idempotent; it does nothing
+    /// if a CoW has already occurred (i.e., `shadow_offset` is 0).
     ///
     /// # Safety
     ///
-    /// The `AccountBorrowed` instance must be properly initialized, pointing to a valid
-    /// memory layout that includes a correctly sized and located shadow buffer at `shadow_offset`.
+    /// The `AccountBorrowed` instance must be properly initialized,
+    /// pointing to a valid memory layout that includes a correctly
+    /// sized and located shadow buffer at `shadow_offset`.
     pub unsafe fn cow(&mut self) {
         // If shadow_offset is 0, CoW has already happened.
         if self.shadow_offset == 0 {
             return;
         }
-        self.is_dirty = true;
+        self.markers.set(true, IS_DIRTY_MARKER_INDEX);
 
         // The source is the start of the current active buffer (lamports field).
         let src = self.lamports as *mut u8;
@@ -261,8 +270,20 @@ impl AccountBorrowed {
         self.flags.set(privileged, PRIVILEGED_FLAG_INDEX);
     }
 
+    /// Indicates whether the account has been
+    /// marked as having privileged runtime access.
     pub fn privileged(&self) -> bool {
         self.flags.is_set(PRIVILEGED_FLAG_INDEX)
+    }
+
+    /// Indicates whether the account's owner has been modified
+    pub fn owner_changed(&self) -> bool {
+        self.markers.is_set(OWNER_CHANGED_MARKER_INDEX)
+    }
+
+    /// Indicates whether the account's balance has been modified
+    pub fn lamports_changed(&self) -> bool {
+        self.markers.is_set(LAMPORTS_CHANGED_MARKER_INDEX)
     }
 }
 
@@ -479,8 +500,7 @@ impl AccountSharedData {
             shadow_offset,
             shadow_switch,
             flags: BitFlags(flags),
-            owner_changed: false,
-            is_dirty: false,
+            markers: BitFlagsOwned::default(),
         }
     }
 
@@ -514,7 +534,7 @@ impl AccountSharedData {
     /// Returns `true` if the account has been modified.
     pub fn is_dirty(&self) -> bool {
         match self {
-            Self::Borrowed(acc) => acc.is_dirty,
+            Self::Borrowed(acc) => acc.markers.is_set(IS_DIRTY_MARKER_INDEX),
             // Owned accounts are heap-allocated copies, so they are always considered "dirty".
             Self::Owned(_) => true,
         }
@@ -982,7 +1002,10 @@ mod tests {
             Pubkey::default(),
             "account owner must have changed"
         );
-        assert!(b.owner_changed, "owner_changed flag must have been set");
+        assert!(
+            b.markers.is_set(OWNER_CHANGED_MARKER_INDEX),
+            "owner_changed marker must have been set"
+        );
     }
 
     /// A generic helper to test a flag's persistence.
@@ -1070,5 +1093,82 @@ mod tests {
             |acc| acc.confined(),
             "confined",
         );
+    }
+
+    #[test]
+    fn test_is_dirty_marker() {
+        let (_buffer, _, mut borrowed) = setup!();
+        let AccountSharedData::Borrowed(b) = &mut borrowed else {
+            panic!("Expected borrowed account");
+        };
+
+        // Initially, is_dirty marker should not be set
+        assert!(
+            !b.markers.is_set(IS_DIRTY_MARKER_INDEX),
+            "is_dirty marker should be false initially"
+        );
+
+        // Performing a CoW should set the is_dirty marker
+        unsafe { b.cow() };
+        assert!(
+            b.markers.is_set(IS_DIRTY_MARKER_INDEX),
+            "is_dirty marker should be set after CoW"
+        );
+    }
+
+    #[test]
+    fn test_owner_changed_marker() {
+        let (_buffer, _, mut borrowed) = setup!();
+
+        // Initially, owner_changed marker should not be set
+        {
+            let AccountSharedData::Borrowed(b) = &borrowed else {
+                panic!("Expected borrowed account");
+            };
+            assert!(
+                !b.owner_changed(),
+                "owner_changed marker should be clear initially"
+            );
+        }
+
+        // Setting owner should set the owner_changed marker
+        borrowed.set_owner(Pubkey::new_from_array([99; 32]));
+        {
+            let AccountSharedData::Borrowed(b) = &borrowed else {
+                panic!("Expected borrowed account");
+            };
+            assert!(
+                b.owner_changed(),
+                "owner_changed marker should have been set"
+            );
+        }
+    }
+
+    #[test]
+    fn test_lamports_changed_marker() {
+        let (_buffer, _, mut borrowed) = setup!();
+
+        // Initially, lamports_changed marker should not be set
+        {
+            let AccountSharedData::Borrowed(b) = &borrowed else {
+                panic!("Expected borrowed account");
+            };
+            assert!(
+                !b.lamports_changed(),
+                "lamports_changed marker should clear initially"
+            );
+        }
+
+        // Setting lamports should set the lamports_changed marker
+        borrowed.set_lamports(9999);
+        {
+            let AccountSharedData::Borrowed(b) = &borrowed else {
+                panic!("Expected borrowed account");
+            };
+            assert!(
+                b.lamports_changed(),
+                "lamports_changed marker should have been set"
+            );
+        }
     }
 }
