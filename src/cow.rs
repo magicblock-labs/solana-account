@@ -220,9 +220,10 @@ impl AccountBorrowed {
 
     /// Switch the pointer to the previous buffer, thus rolling back state
     ///
-    /// # Safety:
-    /// the caller must guarantee, the account has
-    /// previously initialized buffer to rollback to
+    /// # Safety
+    ///
+    /// The caller must guarantee that the account has previously initialized a buffer to rollback to.
+    /// This means a prior `commit()` or `cow()` must have been called before invoking this function.
     #[inline(always)]
     pub unsafe fn rollback(&self) {
         (*self.shadow_switch.0).fetch_sub(1, Ordering::Release);
@@ -553,9 +554,11 @@ impl AccountSharedData {
     /// If the account is Borrowed, rollback its state to previous buffer
     /// Note: Does nothing if the account is Owned
     ///
-    /// # Safety:
-    /// the caller must guarantee, the borrowed account has
-    /// previously initialized valid buffer to rollback to
+    /// # Safety
+    ///
+    /// The caller must guarantee that if this is a `Borrowed` variant, the account has
+    /// previously initialized a valid buffer to rollback to. This requires a prior `commit()`
+    /// or `cow()` call. If the account is `Owned`, this function has no effect and is always safe.
     pub unsafe fn rollback(&self) {
         match self {
             Self::Borrowed(acc) => acc.rollback(),
