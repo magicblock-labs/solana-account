@@ -218,6 +218,16 @@ impl AccountBorrowed {
         }
     }
 
+    /// Switch the pointer to the previous buffer, thus rolling back state
+    ///
+    /// SAFETY:
+    /// the caller must guarantee, the account has
+    /// previously initialized buffer to rollback to
+    #[inline(always)]
+    pub unsafe fn rollback(&self) {
+        (*self.shadow_switch.0).fetch_sub(1, Ordering::Release);
+    }
+
     /// Checks if the owner of a serialized account matches any in the provided slice.
     ///
     /// This function performs a direct memory read without full deserialization.
@@ -856,6 +866,46 @@ mod tests {
             unsafe { *new_borrowed.lamports },
             43,
             "New deserialization should see the latest value"
+        );
+    }
+
+    #[test]
+    fn test_rollback() {
+        let (buffer, _, mut borrowed) = setup!();
+
+        let shadow_switch = buffer.ptr as *const u32;
+
+        // First modification: primary -> shadow, switch = 0 -> 1
+        unsafe { assert_eq!(*shadow_switch, 0) };
+        borrowed.set_lamports(42);
+        if let AccountSharedData::Borrowed(bacc) = &borrowed {
+            bacc.commit();
+        }
+        borrowed = unsafe { AccountSharedData::deserialize_from_mmap(buffer.ptr).into() };
+        assert_eq!(borrowed.lamports(), 42);
+        unsafe { assert_eq!(*shadow_switch, 1, "Switch should be 1 after first commit") };
+
+        // Second modification: shadow -> primary, switch = 1 -> 2
+        borrowed.set_lamports(43);
+        if let AccountSharedData::Borrowed(bacc) = &borrowed {
+            bacc.commit();
+        }
+        borrowed = unsafe { AccountSharedData::deserialize_from_mmap(buffer.ptr).into() };
+        assert_eq!(borrowed.lamports(), 43);
+        unsafe { assert_eq!(*shadow_switch, 2, "Switch should be 2 after second commit") };
+
+        // Rollback: switch = 2 -> 1, pointing back to shadow buffer with lamports = 42
+        if let AccountSharedData::Borrowed(bacc) = &borrowed {
+            unsafe { bacc.rollback() };
+        }
+        unsafe { assert_eq!(*shadow_switch, 1, "Switch should be 1 after rollback") };
+
+        // After rollback, deserialize and verify we see the value from the shadow buffer (lamports = 42)
+        let rolled_back = unsafe { AccountSharedData::deserialize_from_mmap(buffer.ptr) };
+        assert_eq!(
+            unsafe { *rolled_back.lamports },
+            42,
+            "After rollback, deserialization should read from shadow buffer with value 42"
         );
     }
 
