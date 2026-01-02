@@ -220,7 +220,7 @@ impl AccountBorrowed {
 
     /// Switch the pointer to the previous buffer, thus rolling back state
     ///
-    /// SAFETY:
+    /// # SAFETY:
     /// the caller must guarantee, the account has
     /// previously initialized buffer to rollback to
     #[inline(always)]
@@ -547,6 +547,19 @@ impl AccountSharedData {
             Self::Borrowed(acc) => acc.markers.is_set(IS_DIRTY_MARKER_INDEX),
             // Owned accounts are heap-allocated copies, so they are always considered "dirty".
             Self::Owned(_) => true,
+        }
+    }
+
+    /// If the account is Borrowed, rollback its state to previous buffer
+    /// Note: Does nothing if the account is Owned
+    ///
+    /// # SAFETY:
+    /// the caller must guarantee, the borrowed account has
+    /// previously initialized valid buffer to rollback to
+    pub unsafe fn rollback(&self) {
+        match self {
+            Self::Borrowed(acc) => acc.rollback(),
+            Self::Owned(_) => (),
         }
     }
 }
