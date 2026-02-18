@@ -3,7 +3,7 @@
 
 use cow::{
     AccountBorrowed, AccountOwned, COMPRESSED_FLAG_INDEX, CONFINED_FLAG_INDEX,
-    DELEGATED_FLAG_INDEX, EXECUTABLE_FLAG_INDEX, UNDELEGATING_FLAG_INDEX,
+    DELEGATED_FLAG_INDEX, EPHEMERAL_FLAG_INDEX, EXECUTABLE_FLAG_INDEX, UNDELEGATING_FLAG_INDEX,
 };
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
@@ -39,6 +39,9 @@ use {
 pub mod state_traits;
 
 pub mod cow;
+
+#[cfg(test)]
+mod tests;
 
 /// An Account with data that is stored on chain
 #[repr(C)]
@@ -479,6 +482,7 @@ impl fmt::Debug for AccountSharedData {
         f.field("compressed", &self.compressed());
         f.field("undelegating", &self.undelegating());
         f.field("confined", &self.confined());
+        f.field("ephemeral", &self.ephemeral());
         f.field("privileged", &self.privileged());
         f.finish()
     }
@@ -785,6 +789,33 @@ impl AccountSharedData {
         match self {
             Self::Borrowed(acc) => acc.flags.is_set(CONFINED_FLAG_INDEX),
             Self::Owned(acc) => acc.flags.is_set(CONFINED_FLAG_INDEX),
+        }
+    }
+
+    /// Sets the [Self::ephemeral] flag for the account
+    pub fn set_ephemeral(&mut self, ephemeral: bool) {
+        match self {
+            Self::Owned(acc) => {
+                if acc.flags.is_set(EPHEMERAL_FLAG_INDEX) == ephemeral {
+                    return;
+                }
+                acc.flags.set(ephemeral, EPHEMERAL_FLAG_INDEX);
+            }
+            Self::Borrowed(acc) => {
+                if acc.flags.is_set(EPHEMERAL_FLAG_INDEX) == ephemeral {
+                    return;
+                }
+                unsafe { acc.cow() };
+                acc.flags.set(ephemeral, EPHEMERAL_FLAG_INDEX);
+            }
+        }
+    }
+
+    /// Whether the given account is ephemeral
+    pub fn ephemeral(&self) -> bool {
+        match self {
+            Self::Borrowed(acc) => acc.flags.is_set(EPHEMERAL_FLAG_INDEX),
+            Self::Owned(acc) => acc.flags.is_set(EPHEMERAL_FLAG_INDEX),
         }
     }
 
@@ -1117,282 +1148,3 @@ pub const PROGRAM_OWNERS: &[Pubkey] = &[
     bpf_loader_deprecated::id(),
     loader_v4::id(),
 ];
-
-#[cfg(test)]
-pub mod tests {
-    use super::*;
-
-    fn make_two_accounts(key: &Pubkey) -> (Account, AccountSharedData) {
-        let mut account1 = Account::new(1, 2, key);
-        account1.executable = true;
-        let account2 = AccountSharedData::from(account1.clone());
-        assert!(accounts_equal(&account1, &account2));
-        (account1, account2)
-    }
-
-    #[test]
-    fn test_account_data_copy_as_slice() {
-        let key = Pubkey::new_unique();
-        let key2 = Pubkey::new_unique();
-        let (mut account1, mut account2) = make_two_accounts(&key);
-        account1.copy_into_owner_from_slice(key2.as_ref());
-        account2.copy_into_owner_from_slice(key2.as_ref());
-        assert!(accounts_equal(&account1, &account2));
-        assert_eq!(account1.owner(), &key2);
-    }
-
-    #[test]
-    fn test_account_set_data_from_slice() {
-        let key = Pubkey::new_unique();
-        let (_, mut account) = make_two_accounts(&key);
-        assert_eq!(account.data(), &vec![0, 0]);
-        account.set_data_from_slice(&[1, 2]);
-        assert_eq!(account.data(), &vec![1, 2]);
-        account.set_data_from_slice(&[1, 2, 3]);
-        assert_eq!(account.data(), &vec![1, 2, 3]);
-        account.set_data_from_slice(&[4, 5, 6]);
-        assert_eq!(account.data(), &vec![4, 5, 6]);
-        account.set_data_from_slice(&[4, 5, 6, 0]);
-        assert_eq!(account.data(), &vec![4, 5, 6, 0]);
-        account.set_data_from_slice(&[]);
-        assert_eq!(account.data().len(), 0);
-        account.set_data_from_slice(&[44]);
-        assert_eq!(account.data(), &vec![44]);
-        account.set_data_from_slice(&[44]);
-        assert_eq!(account.data(), &vec![44]);
-    }
-
-    #[test]
-    fn test_account_data_set_data() {
-        let key = Pubkey::new_unique();
-        let (_, mut account) = make_two_accounts(&key);
-        assert_eq!(account.data(), &vec![0, 0]);
-        account.set_data(vec![1, 2]);
-        assert_eq!(account.data(), &vec![1, 2]);
-        account.set_data(vec![]);
-        assert_eq!(account.data().len(), 0);
-    }
-
-    #[test]
-    fn test_to_account_shared_data() {
-        let key = Pubkey::new_unique();
-        let (account1, account2) = make_two_accounts(&key);
-        assert!(accounts_equal(&account1, &account2));
-        let account3 = account1.to_account_shared_data();
-        let account4 = account2.to_account_shared_data();
-        assert!(accounts_equal(&account1, &account3));
-        assert!(accounts_equal(&account1, &account4));
-    }
-
-    #[test]
-    fn test_account_shared_data() {
-        let key = Pubkey::new_unique();
-        let (account1, account2) = make_two_accounts(&key);
-        assert!(accounts_equal(&account1, &account2));
-        let account = account1;
-        assert_eq!(account.lamports, 1);
-        assert_eq!(account.lamports(), 1);
-        assert_eq!(account.data.len(), 2);
-        assert_eq!(account.data().len(), 2);
-        assert_eq!(account.owner, key);
-        assert_eq!(account.owner(), &key);
-        assert!(account.executable);
-        assert!(account.executable());
-        let account = account2;
-        assert_eq!(account.lamports(), 1);
-        assert_eq!(account.data().len(), 2);
-        assert_eq!(account.owner(), &key);
-        assert!(account.executable());
-    }
-
-    #[test]
-    fn test_account_add_sub_lamports() {
-        let key = Pubkey::new_unique();
-        let (mut account1, mut account2) = make_two_accounts(&key);
-        assert!(accounts_equal(&account1, &account2));
-        account1.checked_add_lamports(1).unwrap();
-        account2.checked_add_lamports(1).unwrap();
-        assert!(accounts_equal(&account1, &account2));
-        assert_eq!(account1.lamports(), 2);
-        account1.checked_sub_lamports(2).unwrap();
-        account2.checked_sub_lamports(2).unwrap();
-        assert!(accounts_equal(&account1, &account2));
-        assert_eq!(account1.lamports(), 0);
-    }
-
-    #[test]
-    #[should_panic(expected = "Overflow")]
-    fn test_account_checked_add_lamports_overflow() {
-        let key = Pubkey::new_unique();
-        let (mut account1, _account2) = make_two_accounts(&key);
-        account1.checked_add_lamports(u64::MAX).unwrap();
-    }
-
-    #[test]
-    #[should_panic(expected = "Underflow")]
-    fn test_account_checked_sub_lamports_underflow() {
-        let key = Pubkey::new_unique();
-        let (mut account1, _account2) = make_two_accounts(&key);
-        account1.checked_sub_lamports(u64::MAX).unwrap();
-    }
-
-    #[test]
-    #[should_panic(expected = "Overflow")]
-    fn test_account_checked_add_lamports_overflow2() {
-        let key = Pubkey::new_unique();
-        let (_account1, mut account2) = make_two_accounts(&key);
-        account2.checked_add_lamports(u64::MAX).unwrap();
-    }
-
-    #[test]
-    #[should_panic(expected = "Underflow")]
-    fn test_account_checked_sub_lamports_underflow2() {
-        let key = Pubkey::new_unique();
-        let (_account1, mut account2) = make_two_accounts(&key);
-        account2.checked_sub_lamports(u64::MAX).unwrap();
-    }
-
-    #[test]
-    fn test_account_saturating_add_lamports() {
-        let key = Pubkey::new_unique();
-        let (mut account, _) = make_two_accounts(&key);
-
-        let remaining = 22;
-        account.set_lamports(u64::MAX - remaining);
-        account.saturating_add_lamports(remaining * 2);
-        assert_eq!(account.lamports(), u64::MAX);
-    }
-
-    #[test]
-    fn test_account_saturating_sub_lamports() {
-        let key = Pubkey::new_unique();
-        let (mut account, _) = make_two_accounts(&key);
-
-        let remaining = 33;
-        account.set_lamports(remaining);
-        account.saturating_sub_lamports(remaining * 2);
-        assert_eq!(account.lamports(), 0);
-    }
-
-    #[test]
-    fn test_privileged_flag() {
-        let key = Pubkey::new_unique();
-        let (_, mut account) = make_two_accounts(&key);
-
-        // Test initial state
-        assert!(
-            !account.privileged(),
-            "account should not be privileged by default"
-        );
-
-        // Test setting privileged is impossible on owned account
-        // since we cannot get it as borrowed
-        assert!(account.as_borrowed_mut().is_none());
-
-        // Test that other flags are not affected
-        account.set_delegated(true);
-        account.set_executable(false);
-        account.set_compressed(true);
-
-        assert!(!account.privileged(), "privileged flag should remain false");
-        assert!(account.delegated(), "delegated flag should be true");
-        assert!(!account.executable(), "executable flag should be false");
-        assert!(account.compressed(), "compressed flag should be true");
-    }
-
-    #[test]
-    fn test_compressed_flag() {
-        let key = Pubkey::new_unique();
-        let (_, mut account) = make_two_accounts(&key);
-
-        // Test initial state
-        assert!(
-            !account.compressed(),
-            "account should not be compressed by default"
-        );
-
-        // Test setting compressed to true
-        account.set_compressed(true);
-        assert!(account.compressed(), "compressed flag should be true");
-
-        // Test setting compressed to false
-        account.set_compressed(false);
-        assert!(!account.compressed(), "compressed flag should be false");
-
-        // Test that other flags are not affected when setting compressed
-        account.set_delegated(true);
-        account.set_executable(true);
-        account.set_compressed(true);
-
-        assert!(account.delegated(), "delegated flag should remain true");
-        assert!(account.executable(), "executable flag should remain true");
-        assert!(account.compressed(), "compressed flag should be true");
-    }
-
-    #[test]
-    fn test_undelegating_flag() {
-        let key = Pubkey::new_unique();
-        let (_, mut account) = make_two_accounts(&key);
-
-        // Test initial state
-        assert!(
-            !account.undelegating(),
-            "account should not be undelegating by default"
-        );
-
-        // Test setting undelegating to true
-        account.set_undelegating(true);
-        assert!(account.undelegating(), "undelegating flag should be true");
-
-        // Test setting undelegating to false
-        account.set_undelegating(false);
-        assert!(!account.undelegating(), "undelegating flag should be false");
-
-        // Test that other flags are not affected when setting undelegating
-        account.set_delegated(true);
-        account.set_executable(true);
-        account.set_compressed(true);
-        account.set_undelegating(true);
-
-        assert!(account.delegated(), "delegated flag should remain true");
-        assert!(account.executable(), "executable flag should remain true");
-        assert!(account.compressed(), "compressed flag should remain true");
-        assert!(account.undelegating(), "undelegating flag should be true");
-    }
-
-    #[test]
-    fn test_confined_flag() {
-        let key = Pubkey::new_unique();
-        let (_, mut account) = make_two_accounts(&key);
-
-        // Test initial state
-        assert!(
-            !account.confined(),
-            "account should not be confined by default"
-        );
-
-        // Test setting confined to true
-        account.set_confined(true);
-        assert!(account.confined(), "confined flag should be true");
-
-        // Test setting confined to false
-        account.set_confined(false);
-        assert!(!account.confined(), "confined flag should be false");
-
-        // Test that other flags are not affected when setting confined
-        account.set_delegated(true);
-        account.set_executable(true);
-        account.set_compressed(true);
-        account.set_undelegating(true);
-        account.set_confined(true);
-
-        assert!(account.delegated(), "delegated flag should remain true");
-        assert!(account.executable(), "executable flag should remain true");
-        assert!(account.compressed(), "compressed flag should remain true");
-        assert!(
-            account.undelegating(),
-            "undelegating flag should remain true"
-        );
-        assert!(account.confined(), "confined flag should be true");
-    }
-}
