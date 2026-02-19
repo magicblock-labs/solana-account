@@ -492,7 +492,8 @@ impl AccountSharedData {
         serializer.ptr.write_bytes(0, slack_size);
 
         // 10. Zero out the shadow buffer
-        let shadow_start = memptr.add(Self::SERIALIZED_META_SIZE as usize + single_buffer_capacity as usize);
+        let shadow_start =
+            memptr.add(Self::SERIALIZED_META_SIZE as usize + single_buffer_capacity as usize);
         shadow_start.write_bytes(0, single_buffer_capacity as usize);
     }
 

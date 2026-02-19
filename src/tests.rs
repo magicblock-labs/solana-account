@@ -531,13 +531,19 @@ fn test_buffer_jump_to_next_account() {
 
     // Create first account
     let acc1 = AccountSharedData::new_rent_epoch(100, 64, &OWNER, Epoch::MAX);
-    let AccountSharedData::Owned(ref owned1) = acc1 else { panic!("expected owned") };
+    let AccountSharedData::Owned(ref owned1) = acc1 else {
+        panic!("expected owned")
+    };
     unsafe { AccountSharedData::serialize_to_mmap(owned1, ptr, single_size as u32) };
 
     // Create second account at offset single_size
     let acc2 = AccountSharedData::new_rent_epoch(200, 64, &OWNER, Epoch::MAX);
-    let AccountSharedData::Owned(ref owned2) = acc2 else { panic!("expected owned") };
-    unsafe { AccountSharedData::serialize_to_mmap(owned2, ptr.add(single_size), single_size as u32) };
+    let AccountSharedData::Owned(ref owned2) = acc2 else {
+        panic!("expected owned")
+    };
+    unsafe {
+        AccountSharedData::serialize_to_mmap(owned2, ptr.add(single_size), single_size as u32)
+    };
 
     // Deserialize first account and get its buffer
     let b1 = unsafe { AccountSharedData::deserialize_from_mmap(ptr) };
@@ -567,7 +573,9 @@ fn test_slack_space_and_shadow_zeroed() {
     unsafe { buffer.ptr.write_bytes(0xFF, buffer.buffer_size() as usize) };
 
     // Re-serialize (this should zero slack and shadow)
-    let AccountSharedData::Owned(ref owned) = acc else { panic!("expected owned") };
+    let AccountSharedData::Owned(ref owned) = acc else {
+        panic!("expected owned")
+    };
     unsafe { AccountSharedData::serialize_to_mmap(owned, buffer.ptr, buffer.buffer_size()) };
 
     // Deserialize to get buffer info
@@ -577,10 +585,16 @@ fn test_slack_space_and_shadow_zeroed() {
     // Verify slack space is zeroed (data starts at offset 68)
     let data_end = 68 + small_data_size;
     let slack = &buf[data_end..];
-    assert!(slack.iter().all(|&b| b == 0), "slack space should be zeroed");
+    assert!(
+        slack.iter().all(|&b| b == 0),
+        "slack space should be zeroed"
+    );
 
     // Verify shadow buffer is zeroed
     let shadow_start = unsafe { buffer.ptr.add(8 + buf.len()) };
     let shadow_buf = unsafe { std::slice::from_raw_parts(shadow_start, buf.len()) };
-    assert!(shadow_buf.iter().all(|&b| b == 0), "shadow buffer should be zeroed");
+    assert!(
+        shadow_buf.iter().all(|&b| b == 0),
+        "shadow buffer should be zeroed"
+    );
 }
