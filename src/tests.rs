@@ -528,6 +528,7 @@ fn test_buffer_jump_to_next_account() {
     // Allocate space for two consecutive accounts
     let layout = Layout::from_size_align(single_size * 2, alignment as usize).unwrap();
     let ptr = unsafe { alloc(layout) };
+    assert!(!ptr.is_null(), "allocation failed");
 
     // Create first account
     let acc1 = AccountSharedData::new_rent_epoch(100, 64, &OWNER, Epoch::MAX);
@@ -549,8 +550,9 @@ fn test_buffer_jump_to_next_account() {
     let b1 = unsafe { AccountSharedData::deserialize_from_mmap(ptr) };
     let buf1 = b1.buffer();
 
-    // Jump to second account: from buf1 start, add single_size to reach acc2's metadata,
-    // then add 8 to skip metadata and reach acc2's buffer
+    // Jump to second account: buf1.as_ptr() is already 8 bytes past the original allocation
+    // (it points past account1's metadata to account1's buffer start). Adding single_size
+    // lands at account2's buffer start (ptr + 8 + single_size = ptr + single_size + 8).
     let acc2_buf_ptr = unsafe { buf1.as_ptr().add(single_size) };
 
     // Read lamports from account 2's buffer (at offset 0)

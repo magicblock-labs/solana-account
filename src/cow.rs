@@ -260,6 +260,10 @@ impl AccountBorrowed {
     ///
     /// This atomically makes the shadow buffer the new primary buffer.
     /// No-op if no CoW occurred.
+    ///
+    /// Note: calling this method multiple times after a single `cow()` will increment the
+    /// counter each time, corrupting the shadow switch state. The caller must ensure
+    /// `commit()` is called at most once after each `cow()`.
     pub fn commit(&self) {
         if self.shadow_offset == 0 {
             self.shadow_switch.increment();
@@ -568,7 +572,8 @@ impl AccountSharedData {
     ///
     /// The caller must guarantee that if this is a `Borrowed` variant, the account has
     /// previously initialized a valid buffer to rollback to. This requires a prior `commit()`
-    /// or `cow()` call. If the account is `Owned`, this function has no effect and is always safe.
+    /// call (not just `cow()`). `commit()` increments the counter via `ShadowSwitch::increment`,
+    /// while `cow()` does not. If the account is `Owned`, this function has no effect and is always safe.
     pub unsafe fn rollback(&self) {
         if let Self::Borrowed(acc) = self {
             acc.rollback();
