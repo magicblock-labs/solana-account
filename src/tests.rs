@@ -56,7 +56,7 @@ fn test_shadow_switch() {
     borrowed.set_lamports(42);
     // Primary buffer should still have old value before commit
     assert_eq!(
-        unsafe { *AccountSharedData::deserialize_from_mmap(buffer.ptr).lamports },
+        unsafe { *AccountSharedData::deserialize_from_mmap(buffer.ptr).lamports() },
         LAMPORTS
     );
     // Borrowed view should see new value
@@ -69,7 +69,7 @@ fn test_shadow_switch() {
 
     // After commit, deserialization should see committed value
     let new_borrowed = unsafe { AccountSharedData::deserialize_from_mmap(buffer.ptr) };
-    assert_eq!(unsafe { *new_borrowed.lamports }, 42);
+    assert_eq!(unsafe { *new_borrowed.lamports() }, 42);
 }
 
 #[test]
@@ -95,7 +95,7 @@ fn test_switch_back() {
     unsafe { assert_eq!(*shadow_switch, 2) };
 
     let new_borrowed = unsafe { AccountSharedData::deserialize_from_mmap(buffer.ptr) };
-    assert_eq!(unsafe { *new_borrowed.lamports }, 43);
+    assert_eq!(unsafe { *new_borrowed.lamports() }, 43);
 }
 
 #[test]
@@ -127,8 +127,7 @@ fn test_setting_data_from_slice() {
 
     // Verify the length field in memory was updated via the relative offset hack
     assert_eq!(
-        unsafe { *(b.data.ptr.offset(RELATIVE_DATA_LEN_POINTER_OFFSET_TEST) as *const u32) }
-            as usize,
+        unsafe { *(b.data().offset(RELATIVE_DATA_LEN_POINTER_OFFSET_TEST) as *const u32) } as usize,
         msg.len()
     );
 }
@@ -146,18 +145,18 @@ fn test_account_shrinking() {
     };
     // Verify length is zero via relative offset hack
     assert_eq!(
-        unsafe { *(b.data.ptr.offset(RELATIVE_DATA_LEN_POINTER_OFFSET_TEST) as *const u32) },
+        unsafe { *(b.data().offset(RELATIVE_DATA_LEN_POINTER_OFFSET_TEST) as *const u32) },
         0
     );
     // Verify capacity wasn't corrupted
-    assert_eq!(b.data.cap, original_cap as u32);
+    assert_eq!(b.data_cap(), original_cap as u32);
 }
 
 #[test]
 fn test_account_growth() {
     let (_buffer, _, mut borrowed) = setup!();
     let original_cap = if let AccountSharedData::Borrowed(b) = &borrowed {
-        b.data.cap
+        b.data_cap()
     } else {
         0
     };
@@ -169,11 +168,11 @@ fn test_account_growth() {
     if let AccountSharedData::Borrowed(ref b) = borrowed {
         // Verify length in memory via relative offset hack
         assert_eq!(
-            unsafe { *(b.data.ptr.offset(RELATIVE_DATA_LEN_POINTER_OFFSET_TEST) as *const u32) },
+            unsafe { *(b.data().offset(RELATIVE_DATA_LEN_POINTER_OFFSET_TEST) as *const u32) },
             SPACE as u32 * 2
         );
         // Verify capacity wasn't corrupted
-        assert_eq!(b.data.cap, original_cap);
+        assert_eq!(b.data_cap(), original_cap);
     } else {
         panic!("should remain borrowed");
     }
@@ -253,7 +252,7 @@ fn test_markers() {
     assert!(b.owner_changed());
     assert!(b.markers.is_set(OWNER_CHANGED_MARKER_INDEX));
     // Verify owner actually changed in memory
-    assert_eq!(unsafe { *b.owner }, new_owner);
+    assert_eq!(unsafe { *b.owner() }, new_owner);
 
     // Test lamports_changed marker
     let (_buffer, _, mut borrowed) = setup!();
@@ -500,4 +499,104 @@ fn test_account_saturating_sub_lamports() {
     account.set_lamports(remaining);
     account.saturating_sub_lamports(remaining * 2);
     assert_eq!(account.lamports(), 0);
+}
+
+#[test]
+fn test_buffer_allocation_size() {
+    let (buffer, _, borrowed) = setup!();
+
+    let AccountSharedData::Borrowed(b) = &borrowed else {
+        panic!("Expected borrowed account");
+    };
+
+    let buf = b.buffer();
+    // Total allocation >= metadata (8) + 2 * buffer (primary + shadow)
+    // May have additional padding for alignment
+    let min_expected = 2 * buf.len() + 8;
+    assert!(buffer.buffer_size() as usize >= min_expected);
+    assert_eq!(buffer.buffer_size() % 256, 0); // properly aligned
+}
+
+#[test]
+fn test_buffer_jump_to_next_account() {
+    use std::alloc::{alloc, dealloc, Layout};
+
+    let data_len: u32 = 1024;
+    let alignment: u32 = 128;
+    let single_size = AccountSharedData::serialized_size_aligned(data_len, alignment) as usize;
+
+    // Allocate space for two consecutive accounts
+    let layout = Layout::from_size_align(single_size * 2, alignment as usize).unwrap();
+    let ptr = unsafe { alloc(layout) };
+    assert!(!ptr.is_null(), "allocation failed");
+
+    // Create first account
+    let acc1 = AccountSharedData::new_rent_epoch(100, 64, &OWNER, Epoch::MAX);
+    let AccountSharedData::Owned(ref owned1) = acc1 else {
+        panic!("expected owned")
+    };
+    unsafe { AccountSharedData::serialize_to_mmap(owned1, ptr, single_size as u32) };
+
+    // Create second account at offset single_size
+    let acc2 = AccountSharedData::new_rent_epoch(200, 64, &OWNER, Epoch::MAX);
+    let AccountSharedData::Owned(ref owned2) = acc2 else {
+        panic!("expected owned")
+    };
+    unsafe {
+        AccountSharedData::serialize_to_mmap(owned2, ptr.add(single_size), single_size as u32)
+    };
+
+    // Deserialize first account and get its buffer
+    let b1 = unsafe { AccountSharedData::deserialize_from_mmap(ptr) };
+    let buf1 = b1.buffer();
+
+    // Jump to second account: buf1.as_ptr() is already 8 bytes past the original allocation
+    // (it points past account1's metadata to account1's buffer start). Adding single_size
+    // lands at account2's buffer start (ptr + 8 + single_size = ptr + single_size + 8).
+    let acc2_buf_ptr = unsafe { buf1.as_ptr().add(single_size) };
+
+    // Read lamports from account 2's buffer (at offset 0)
+    let acc2_lamports = unsafe { *(acc2_buf_ptr as *const u64) };
+    assert_eq!(acc2_lamports, 200);
+
+    unsafe { dealloc(ptr, layout) };
+}
+
+#[test]
+fn test_slack_space_and_shadow_zeroed() {
+    let small_data_size = 32;
+    let data_len: u32 = 256;
+
+    // Create account and get a buffer for it
+    let acc = AccountSharedData::new(LAMPORTS, small_data_size, &OWNER);
+    let (buffer, _) = create_borrowed_account_shared_data(&acc, data_len);
+
+    // Fill entire buffer with non-zero bytes to test zeroing
+    unsafe { buffer.ptr.write_bytes(0xFF, buffer.buffer_size() as usize) };
+
+    // Re-serialize (this should zero slack and shadow)
+    let AccountSharedData::Owned(ref owned) = acc else {
+        panic!("expected owned")
+    };
+    unsafe { AccountSharedData::serialize_to_mmap(owned, buffer.ptr, buffer.buffer_size()) };
+
+    // Deserialize to get buffer info
+    let b = unsafe { AccountSharedData::deserialize_from_mmap(buffer.ptr) };
+    let buf = b.buffer();
+
+    // Verify slack space is zeroed (data starts at buffer offset 60)
+    let data_end = 60 + small_data_size;
+    let slack = &buf[data_end..];
+    assert!(
+        slack.iter().all(|&b| b == 0),
+        "slack space should be zeroed"
+    );
+
+    // Verify shadow buffer is zeroed
+    let shadow_start = unsafe { buffer.ptr.add(8 + buf.len()) };
+    let shadow_buf = unsafe { std::slice::from_raw_parts(shadow_start, buf.len()) };
+    assert!(
+        shadow_buf.iter().all(|&b| b == 0),
+        "shadow buffer should be zeroed"
+    );
 }
