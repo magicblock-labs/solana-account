@@ -582,8 +582,8 @@ fn test_slack_space_and_shadow_zeroed() {
     let b = unsafe { AccountSharedData::deserialize_from_mmap(buffer.ptr) };
     let buf = b.buffer();
 
-    // Verify slack space is zeroed (data starts at offset 68)
-    let data_end = 68 + small_data_size;
+    // Verify slack space is zeroed (data starts at buffer offset 60)
+    let data_end = 60 + small_data_size;
     let slack = &buf[data_end..];
     assert!(
         slack.iter().all(|&b| b == 0),

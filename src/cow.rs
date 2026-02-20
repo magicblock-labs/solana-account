@@ -94,6 +94,9 @@ pub(crate) const UNDELEGATING_FLAG_INDEX: u32 = 4;
 pub(crate) const CONFINED_FLAG_INDEX: u32 = 5;
 pub(crate) const EPHEMERAL_FLAG_INDEX: u32 = 6;
 
+// Static assertion: all flag indices fit in u8 (BitFlagsOwned truncates u32 -> u8).
+const _: () = assert!(EPHEMERAL_FLAG_INDEX < 8);
+
 // --- Marker bit indices (runtime state, not persisted) ---
 pub(crate) const IS_DIRTY_MARKER_INDEX: u32 = 0;
 pub(crate) const OWNER_CHANGED_MARKER_INDEX: u32 = 1;
@@ -267,7 +270,10 @@ impl AccountBorrowed {
     ///
     /// # Safety
     ///
-    /// The caller must guarantee that a prior `commit()` or `cow()` was called.
+    /// The caller must guarantee that a prior `commit()` was called (not just `cow()`).
+    /// `commit()` increments the counter via `ShadowSwitch::increment`, while `cow()` does not.
+    /// Calling `rollback` without a prior `commit` might cause `fetch_sub` to underflow
+    /// the atomic `u32` counter (e.g., 0 -> u32::MAX), corrupting the `shadow_switch` state.
     pub unsafe fn rollback(&self) {
         (*self.shadow_switch.0).fetch_sub(1, Ordering::Release);
     }
