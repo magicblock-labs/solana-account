@@ -156,10 +156,10 @@ impl From<AccountSharedData> for Account {
         match other {
             AccountSharedData::Borrowed(acc) => unsafe {
                 Self {
-                    lamports: *acc.lamports,
-                    data: acc.data.to_vec(),
-                    owner: *acc.owner,
-                    executable: acc.flags.is_set(EXECUTABLE_FLAG_INDEX),
+                    lamports: *acc.lamports(),
+                    data: acc.data_as_slice().to_vec(),
+                    owner: *acc.owner(),
+                    executable: acc.flag_is_set(EXECUTABLE_FLAG_INDEX),
                     rent_epoch: Epoch::MAX,
                 }
             },
@@ -304,12 +304,12 @@ impl WritableAccount for AccountSharedData {
     fn set_lamports(&mut self, lamports: u64) {
         match self {
             Self::Borrowed(acc) => unsafe {
-                if *acc.lamports == lamports {
+                if *acc.lamports() == lamports {
                     return;
                 }
                 acc.cow();
                 acc.markers.set(true, LAMPORTS_CHANGED_MARKER_INDEX);
-                *acc.lamports = lamports;
+                *acc.lamports() = lamports;
             },
             Self::Owned(acc) => acc.lamports = lamports,
         }
@@ -322,12 +322,12 @@ impl WritableAccount for AccountSharedData {
     fn set_owner(&mut self, owner: Pubkey) {
         match self {
             Self::Borrowed(acc) => unsafe {
-                if *acc.owner == owner {
+                if *acc.owner() == owner {
                     return;
                 }
                 acc.cow();
                 acc.markers.set(true, OWNER_CHANGED_MARKER_INDEX);
-                *acc.owner = owner;
+                *acc.owner() = owner;
             },
             Self::Owned(acc) => acc.owner = owner,
         }
@@ -336,11 +336,11 @@ impl WritableAccount for AccountSharedData {
     fn copy_into_owner_from_slice(&mut self, source: &[u8]) {
         match self {
             Self::Borrowed(acc) => unsafe {
-                if (*acc.owner).as_array() == source {
+                if (*acc.owner()).as_array() == source {
                     return;
                 }
                 acc.cow();
-                (acc.owner as *mut u8)
+                (acc.owner() as *mut u8)
                     .copy_from_nonoverlapping(source.as_ptr(), size_of::<Pubkey>());
             },
             Self::Owned(acc) => acc.owner.as_mut().copy_from_slice(source),
@@ -350,12 +350,12 @@ impl WritableAccount for AccountSharedData {
     fn set_executable(&mut self, executable: bool) {
         match self {
             Self::Borrowed(acc) => {
-                if acc.flags.is_set(EXECUTABLE_FLAG_INDEX) == executable {
+                if acc.flag_is_set(EXECUTABLE_FLAG_INDEX) == executable {
                     return;
                 }
                 unsafe { acc.cow() };
 
-                acc.flags.set(executable, EXECUTABLE_FLAG_INDEX);
+                acc.set_flag(executable, EXECUTABLE_FLAG_INDEX);
             }
             Self::Owned(acc) => acc.flags.set(executable, EXECUTABLE_FLAG_INDEX),
         }
@@ -387,25 +387,25 @@ impl WritableAccount for AccountSharedData {
 impl ReadableAccount for AccountSharedData {
     fn lamports(&self) -> u64 {
         match self {
-            Self::Borrowed(acc) => unsafe { *acc.lamports },
+            Self::Borrowed(acc) => unsafe { *acc.lamports() },
             Self::Owned(acc) => acc.lamports,
         }
     }
     fn data(&self) -> &[u8] {
         match self {
-            Self::Borrowed(acc) => &acc.data,
+            Self::Borrowed(acc) => acc.data_as_slice(),
             Self::Owned(acc) => &acc.data,
         }
     }
     fn owner(&self) -> &Pubkey {
         match self {
-            Self::Borrowed(acc) => unsafe { &*acc.owner },
+            Self::Borrowed(acc) => unsafe { &*acc.owner() },
             Self::Owned(acc) => &acc.owner,
         }
     }
     fn executable(&self) -> bool {
         match self {
-            Self::Borrowed(acc) => acc.flags.is_set(EXECUTABLE_FLAG_INDEX),
+            Self::Borrowed(acc) => acc.flag_is_set(EXECUTABLE_FLAG_INDEX),
             Self::Owned(acc) => acc.flags.is_set(EXECUTABLE_FLAG_INDEX),
         }
     }
@@ -658,11 +658,11 @@ impl AccountSharedData {
         if let Self::Borrowed(acc) = self {
             *self = unsafe {
                 Self::Owned(AccountOwned {
-                    lamports: *acc.lamports,
-                    data: Arc::new((*acc.data).to_vec()),
-                    owner: *acc.owner,
-                    remote_slot: *acc.remote_slot,
-                    flags: acc.flags.into(),
+                    lamports: *acc.lamports(),
+                    data: Arc::new(acc.data_as_slice().to_vec()),
+                    owner: *acc.owner(),
+                    remote_slot: *acc.remote_slot(),
+                    flags: acc.flags_into_owned(),
                 })
             }
         }
@@ -693,11 +693,11 @@ impl AccountSharedData {
                 acc.flags.set(delegated, DELEGATED_FLAG_INDEX);
             }
             Self::Borrowed(acc) => {
-                if acc.flags.is_set(DELEGATED_FLAG_INDEX) == delegated {
+                if acc.flag_is_set(DELEGATED_FLAG_INDEX) == delegated {
                     return;
                 }
                 unsafe { acc.cow() };
-                acc.flags.set(delegated, DELEGATED_FLAG_INDEX);
+                acc.set_flag(delegated, DELEGATED_FLAG_INDEX);
             }
         }
     }
@@ -705,7 +705,7 @@ impl AccountSharedData {
     /// Whether the given account is delegated or not
     pub fn delegated(&self) -> bool {
         match self {
-            Self::Borrowed(acc) => acc.flags.is_set(DELEGATED_FLAG_INDEX),
+            Self::Borrowed(acc) => acc.flag_is_set(DELEGATED_FLAG_INDEX),
             Self::Owned(acc) => acc.flags.is_set(DELEGATED_FLAG_INDEX),
         }
     }
@@ -720,11 +720,11 @@ impl AccountSharedData {
                 acc.flags.set(compressed, COMPRESSED_FLAG_INDEX);
             }
             Self::Borrowed(acc) => {
-                if acc.flags.is_set(COMPRESSED_FLAG_INDEX) == compressed {
+                if acc.flag_is_set(COMPRESSED_FLAG_INDEX) == compressed {
                     return;
                 }
                 unsafe { acc.cow() };
-                acc.flags.set(compressed, COMPRESSED_FLAG_INDEX);
+                acc.set_flag(compressed, COMPRESSED_FLAG_INDEX);
             }
         }
     }
@@ -732,7 +732,7 @@ impl AccountSharedData {
     /// Whether the given account is compressed on chain
     pub fn compressed(&self) -> bool {
         match self {
-            Self::Borrowed(acc) => acc.flags.is_set(COMPRESSED_FLAG_INDEX),
+            Self::Borrowed(acc) => acc.flag_is_set(COMPRESSED_FLAG_INDEX),
             Self::Owned(acc) => acc.flags.is_set(COMPRESSED_FLAG_INDEX),
         }
     }
@@ -747,11 +747,11 @@ impl AccountSharedData {
                 acc.flags.set(undelegating, UNDELEGATING_FLAG_INDEX);
             }
             Self::Borrowed(acc) => {
-                if acc.flags.is_set(UNDELEGATING_FLAG_INDEX) == undelegating {
+                if acc.flag_is_set(UNDELEGATING_FLAG_INDEX) == undelegating {
                     return;
                 }
                 unsafe { acc.cow() };
-                acc.flags.set(undelegating, UNDELEGATING_FLAG_INDEX);
+                acc.set_flag(undelegating, UNDELEGATING_FLAG_INDEX);
             }
         }
     }
@@ -759,7 +759,7 @@ impl AccountSharedData {
     /// Whether the given account is undelegating
     pub fn undelegating(&self) -> bool {
         match self {
-            Self::Borrowed(acc) => acc.flags.is_set(UNDELEGATING_FLAG_INDEX),
+            Self::Borrowed(acc) => acc.flag_is_set(UNDELEGATING_FLAG_INDEX),
             Self::Owned(acc) => acc.flags.is_set(UNDELEGATING_FLAG_INDEX),
         }
     }
@@ -774,11 +774,11 @@ impl AccountSharedData {
                 acc.flags.set(confined, CONFINED_FLAG_INDEX);
             }
             Self::Borrowed(acc) => {
-                if acc.flags.is_set(CONFINED_FLAG_INDEX) == confined {
+                if acc.flag_is_set(CONFINED_FLAG_INDEX) == confined {
                     return;
                 }
                 unsafe { acc.cow() };
-                acc.flags.set(confined, CONFINED_FLAG_INDEX);
+                acc.set_flag(confined, CONFINED_FLAG_INDEX);
             }
         }
     }
@@ -787,7 +787,7 @@ impl AccountSharedData {
     /// For instance we cannot change the lamports or data size of such an account.
     pub fn confined(&self) -> bool {
         match self {
-            Self::Borrowed(acc) => acc.flags.is_set(CONFINED_FLAG_INDEX),
+            Self::Borrowed(acc) => acc.flag_is_set(CONFINED_FLAG_INDEX),
             Self::Owned(acc) => acc.flags.is_set(CONFINED_FLAG_INDEX),
         }
     }
@@ -802,11 +802,11 @@ impl AccountSharedData {
                 acc.flags.set(ephemeral, EPHEMERAL_FLAG_INDEX);
             }
             Self::Borrowed(acc) => {
-                if acc.flags.is_set(EPHEMERAL_FLAG_INDEX) == ephemeral {
+                if acc.flag_is_set(EPHEMERAL_FLAG_INDEX) == ephemeral {
                     return;
                 }
                 unsafe { acc.cow() };
-                acc.flags.set(ephemeral, EPHEMERAL_FLAG_INDEX);
+                acc.set_flag(ephemeral, EPHEMERAL_FLAG_INDEX);
             }
         }
     }
@@ -814,7 +814,7 @@ impl AccountSharedData {
     /// Whether the given account is ephemeral
     pub fn ephemeral(&self) -> bool {
         match self {
-            Self::Borrowed(acc) => acc.flags.is_set(EPHEMERAL_FLAG_INDEX),
+            Self::Borrowed(acc) => acc.flag_is_set(EPHEMERAL_FLAG_INDEX),
             Self::Owned(acc) => acc.flags.is_set(EPHEMERAL_FLAG_INDEX),
         }
     }
@@ -830,7 +830,7 @@ impl AccountSharedData {
 
     pub fn remote_slot(&self) -> u64 {
         match self {
-            Self::Borrowed(acc) => unsafe { *acc.remote_slot },
+            Self::Borrowed(acc) => unsafe { *acc.remote_slot() },
             Self::Owned(acc) => acc.remote_slot,
         }
     }
@@ -840,14 +840,14 @@ impl AccountSharedData {
             Self::Owned(acc) => acc.remote_slot = remote_slot,
             Self::Borrowed(acc) => unsafe {
                 acc.cow();
-                *acc.remote_slot = remote_slot;
+                *acc.remote_slot() = remote_slot;
             },
         }
     }
 
     pub fn reserve(&mut self, additional: usize) {
         if let Self::Borrowed(acc) = self {
-            if (acc.data.cap as usize) < (acc.data.len as usize + additional) {
+            if (acc.data_cap() as usize) < (acc.data_len() as usize + additional) {
                 self.ensure_owned();
             } else {
                 return;
@@ -867,7 +867,7 @@ impl AccountSharedData {
     pub fn capacity(&self) -> usize {
         match self {
             Self::Owned(acc) => acc.data.capacity(),
-            Self::Borrowed(acc) => acc.data.cap as usize,
+            Self::Borrowed(acc) => acc.data_cap() as usize,
         }
     }
 
@@ -884,7 +884,7 @@ impl AccountSharedData {
             Self::Owned(acc) => Arc::make_mut(&mut acc.data).as_mut_slice(),
             Self::Borrowed(acc) => {
                 unsafe { acc.cow() };
-                &mut acc.data
+                acc.data_as_slice_mut()
             }
         }
     }
@@ -902,7 +902,7 @@ impl AccountSharedData {
                 // the old one and old data is already initialized
                 unsafe {
                     acc.cow();
-                    acc.data.set_len(new_len);
+                    acc.data_slice_mut().set_len(new_len);
                 }
             }
         }
@@ -928,8 +928,8 @@ impl AccountSharedData {
                 // new_len doesn't exceed the available capacity
                 unsafe {
                     acc.cow();
-                    acc.data.ptr.copy_from_nonoverlapping(new_ptr, new_len);
-                    acc.data.set_len(new_len);
+                    acc.data().copy_from_nonoverlapping(new_ptr, new_len);
+                    acc.data_slice_mut().set_len(new_len);
                 }
                 return;
             }
@@ -980,10 +980,9 @@ impl AccountSharedData {
             // data.len() doesn't exceed the available capacity
             unsafe {
                 acc.cow();
-                acc.data
-                    .ptr
+                acc.data()
                     .copy_from_nonoverlapping(data.as_slice().as_ptr(), data.len());
-                acc.data.set_len(data.len());
+                acc.data_slice_mut().set_len(data.len());
             }
             return;
         }
@@ -998,10 +997,10 @@ impl AccountSharedData {
         match self {
             Self::Borrowed(acc) => unsafe {
                 acc.cow();
-                let ptr = acc.data.ptr.add(acc.data.len as usize) as *mut MaybeUninit<u8>;
+                let ptr = acc.data().add(acc.data_len() as usize) as *mut MaybeUninit<u8>;
                 std::slice::from_raw_parts_mut(
                     ptr,
-                    acc.data.cap.saturating_sub(acc.data.len) as usize,
+                    acc.data_cap().saturating_sub(acc.data_len()) as usize,
                 )
             },
             Self::Owned(acc) => Arc::make_mut(&mut acc.data).spare_capacity_mut(),

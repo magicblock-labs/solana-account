@@ -54,6 +54,7 @@
 use std::{
     mem::{align_of, size_of},
     ops::{Deref, DerefMut, Div, Mul},
+    ptr::NonNull,
     sync::{
         atomic::{AtomicU32, Ordering},
         Arc,
@@ -64,16 +65,27 @@ use solana_pubkey::Pubkey;
 
 use crate::AccountSharedData;
 
+// --- Memory Layout Offsets ---
+// NOTE: These constants define the memory layout of a serialized account and must
+// be kept in sync with the `serialize_to_mmap` function.
+const LAMPORTS_OFFSET: usize = 0;
+const OWNER_OFFSET: usize = LAMPORTS_OFFSET + size_of::<u64>();
+const REMOTE_SLOT_OFFSET: usize = OWNER_OFFSET + size_of::<Pubkey>();
+const FLAGS_OFFSET: usize = REMOTE_SLOT_OFFSET + size_of::<u64>();
+const DATA_CAPACITY_OFFSET: usize = FLAGS_OFFSET + size_of::<u32>();
+const DATA_LEN_OFFSET: usize = DATA_CAPACITY_OFFSET + size_of::<u32>();
+const DATA_START_OFFSET: usize = DATA_LEN_OFFSET + size_of::<u32>();
+
 /// The byte offset to find the data length (`u32`) relative to the data pointer.
-/// This is a performance optimization (a "dirty hack") that relies on the fixed
-/// memory layout where `data_len` is stored immediately before `data`
+/// This is a performance optimization that relies on the fixed memory layout
+/// where `data_len` is stored immediately before `data`.
 ///
 /// NOTE: Any changes to the memory layout must be reflected here.
-const RELATIVE_DATA_LEN_POINTER_OFFSET: isize = -4;
+const RELATIVE_DATA_LEN_OFFSET: isize = -4;
 #[cfg(test)]
-pub(crate) const RELATIVE_DATA_LEN_POINTER_OFFSET_TEST: isize = RELATIVE_DATA_LEN_POINTER_OFFSET;
+pub(crate) const RELATIVE_DATA_LEN_POINTER_OFFSET_TEST: isize = RELATIVE_DATA_LEN_OFFSET;
 
-// --- Flag bit indices ---
+// --- Flag bit indices (stored in u32 at FLAGS_OFFSET) ---
 pub(crate) const EXECUTABLE_FLAG_INDEX: u32 = 0;
 pub(crate) const DELEGATED_FLAG_INDEX: u32 = 1;
 pub(crate) const PRIVILEGED_FLAG_INDEX: u32 = 2;
@@ -82,24 +94,17 @@ pub(crate) const UNDELEGATING_FLAG_INDEX: u32 = 4;
 pub(crate) const CONFINED_FLAG_INDEX: u32 = 5;
 pub(crate) const EPHEMERAL_FLAG_INDEX: u32 = 6;
 
-// --- Ephemeral marker bit indices ---
+// Static assertion: all flag indices fit in u8 (BitFlagsOwned truncates u32 -> u8).
+const _: () = assert!(EPHEMERAL_FLAG_INDEX < 8);
+
+// --- Marker bit indices (runtime state, not persisted) ---
 pub(crate) const IS_DIRTY_MARKER_INDEX: u32 = 0;
 pub(crate) const OWNER_CHANGED_MARKER_INDEX: u32 = 1;
 pub(crate) const LAMPORTS_CHANGED_MARKER_INDEX: u32 = 2;
 
-// --- Memory Layout Offsets ---
-// NOTE: These constants define the memory layout of a serialized account and must
-// be kept in sync with the `serialize_to_mmap` and `deserialize_from_mmap` functions.
-const LAMPORTS_OFFSET: usize = 0;
-const OWNER_OFFSET: usize = LAMPORTS_OFFSET + size_of::<u64>();
-const REMOTE_SLOT_OFFSET: usize = OWNER_OFFSET + size_of::<Pubkey>();
-const FLAGS_OFFSET: usize = REMOTE_SLOT_OFFSET + size_of::<u64>();
-const DATA_CAPACITY_OFFSET: usize = FLAGS_OFFSET + size_of::<u32>();
-const DATA_LEN_OFFSET: usize = DATA_CAPACITY_OFFSET + size_of::<u32>();
-
 /// A memory-optimized, "borrowed" view of a Solana account residing in a memory-mapped region.
 ///
-/// This struct uses raw pointers to directly access and manipulate the serialized account data,
+/// This struct uses a single pointer to directly access and manipulate the serialized account data,
 /// avoiding deserialization costs. It implements a Copy-on-Write (CoW) mechanism to handle
 /// modifications: changes are written to a separate "shadow" buffer, ensuring the original
 /// data remains untouched until the changes are committed.
@@ -112,47 +117,18 @@ pub struct AccountBorrowed {
     /// and a negative value means the shadow buffer is active. A value of `0` indicates
     /// that a CoW has already occurred and no further copies are needed.
     shadow_offset: isize,
-    /// A raw pointer to the account's lamports (`u64`).
-    pub(crate) lamports: *mut u64,
-    /// A view into the account's data slice within the memory map.
-    pub(crate) data: DataSlice,
-    /// A raw pointer to the account's owner (`Pubkey`).
-    pub(crate) owner: *mut Pubkey,
-    /// A raw pointer to the remote slot number (`u64`).
-    pub(crate) remote_slot: *mut u64,
-    /// A wrapper around a raw pointer to the bit-packed flags field (`u32`).
-    /// Flags include:
-    /// - `0`: `executable`
-    /// - `1`: `delegated`
-    /// - `2`: `privileged`
-    /// - `3`: `compressed`
-    /// - `4`: `undelegating`
-    /// - `5`: `confined`
-    /// - `6`: `ephemeral`
-    pub(crate) flags: BitFlags,
-    /// A collection of not persisted (ephemeral) boolean markers,
-    /// indicating a runtime specific account state transitions
-    /// - `0`: `is dirty`
-    /// - `1`: `owner changed`
-    /// - `2`: `lamports changed`
+    /// Pointer to the start of the active buffer (lamports field).
+    buffer: NonNull<u8>,
+    /// Runtime markers (not persisted to disk):
+    /// - bit 0: `is_dirty` - account has been modified
+    /// - bit 1: `owner_changed` - owner field was modified
+    /// - bit 2: `lamports_changed` - lamports field was modified
     pub(crate) markers: BitFlagsOwned,
 }
 
-/// A wrapper for a raw pointer to a `u32` used for bit-packed flags.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) struct BitFlags(*mut u32);
-
-/// A wrapper for a `u8` used for bit-packed flags.
+/// Bit-packed flags stored inline (u8).
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct BitFlagsOwned(u8);
-
-impl From<BitFlags> for BitFlagsOwned {
-    fn from(val: BitFlags) -> Self {
-        // SAFETY:
-        // *mut u32 in BitFlags is alwasy properly initialized
-        Self(unsafe { *val.0 } as u8)
-    }
-}
 
 impl From<AccountBorrowed> for AccountSharedData {
     fn from(value: AccountBorrowed) -> Self {
@@ -170,133 +146,205 @@ unsafe impl Send for AccountBorrowed {}
 unsafe impl Sync for AccountBorrowed {}
 
 impl AccountBorrowed {
-    /// Performs a Copy-on-Write (CoW) by copying the
-    /// active account buffer to its shadow buffer.
+    // --- Field accessors ---
+
+    /// Returns a pointer to the lamports field.
+    pub(crate) fn lamports(&self) -> *mut u64 {
+        self.buffer.as_ptr() as *mut u64
+    }
+
+    /// Returns a pointer to the owner field.
+    pub(crate) fn owner(&self) -> *mut Pubkey {
+        // SAFETY: buffer is guaranteed to be valid and OWNER_OFFSET is within bounds.
+        unsafe { self.buffer.as_ptr().add(OWNER_OFFSET) as *mut Pubkey }
+    }
+
+    /// Returns a pointer to the remote_slot field.
+    pub(crate) fn remote_slot(&self) -> *mut u64 {
+        // SAFETY: buffer is guaranteed to be valid and REMOTE_SLOT_OFFSET is within bounds.
+        unsafe { self.buffer.as_ptr().add(REMOTE_SLOT_OFFSET) as *mut u64 }
+    }
+
+    /// Returns a pointer to the start of the data payload.
+    pub(crate) fn data(&self) -> *mut u8 {
+        // SAFETY: buffer is guaranteed to be valid and DATA_START_OFFSET is within bounds.
+        unsafe { self.buffer.as_ptr().add(DATA_START_OFFSET) }
+    }
+
+    /// Returns the data length.
+    pub(crate) fn data_len(&self) -> u32 {
+        // SAFETY: buffer is guaranteed to be valid and DATA_LEN_OFFSET is within bounds.
+        unsafe { *(self.buffer.as_ptr().add(DATA_LEN_OFFSET) as *const u32) }
+    }
+
+    /// Returns the data capacity.
+    pub(crate) fn data_cap(&self) -> u32 {
+        // SAFETY: buffer is guaranteed to be valid and DATA_CAPACITY_OFFSET is within bounds.
+        unsafe { *(self.buffer.as_ptr().add(DATA_CAPACITY_OFFSET) as *const u32) }
+    }
+
+    /// Returns a reference to the account's data as a slice.
+    pub(crate) fn data_as_slice(&self) -> &[u8] {
+        // SAFETY: data() and data_len() are guaranteed to be valid.
+        unsafe { std::slice::from_raw_parts(self.data(), self.data_len() as usize) }
+    }
+
+    /// Returns a mutable reference to the account's data as a slice.
+    pub(crate) fn data_as_slice_mut(&mut self) -> &mut [u8] {
+        // SAFETY: data() and data_len() are guaranteed to be valid.
+        unsafe { std::slice::from_raw_parts_mut(self.data(), self.data_len() as usize) }
+    }
+
+    /// Returns a DataSlice for modifying the data length in memory.
+    pub(crate) fn data_slice_mut(&mut self) -> DataSlice {
+        DataSlice {
+            ptr: self.data(),
+            len: self.data_len(),
+            cap: self.data_cap(),
+        }
+    }
+
+    // --- Flag accessors ---
+
+    /// Checks if the flag at `index` is set.
+    pub(crate) fn flag_is_set(&self, index: u32) -> bool {
+        // SAFETY: buffer is valid and FLAGS_OFFSET is within bounds.
+        unsafe { (*(self.buffer.as_ptr().add(FLAGS_OFFSET) as *const u32) >> index) & 1 == 1 }
+    }
+
+    /// Sets or clears the flag at `index`.
+    pub(crate) fn set_flag(&mut self, val: bool, index: u32) {
+        // SAFETY: buffer is valid, FLAGS_OFFSET is within bounds.
+        // Modifications only occur after CoW, so we write to a private shadow buffer.
+        unsafe {
+            let flags = self.buffer.as_ptr().add(FLAGS_OFFSET) as *mut u32;
+            if val {
+                *flags |= 1 << index;
+            } else {
+                *flags &= !(1 << index);
+            }
+        }
+    }
+
+    /// Copies flags to an owned BitFlagsOwned.
+    pub(crate) fn flags_into_owned(&self) -> BitFlagsOwned {
+        // SAFETY: buffer is valid and FLAGS_OFFSET is within bounds.
+        BitFlagsOwned(unsafe { *(self.buffer.as_ptr().add(FLAGS_OFFSET) as *const u32) } as u8)
+    }
+
+    // --- CoW operations ---
+
+    /// Performs a Copy-on-Write (CoW) by copying the active buffer to its shadow buffer.
     ///
-    /// After the copy, all internal pointers are updated to point to the
-    /// new shadow buffer. This function is idempotent; it does nothing
-    /// if a CoW has already occurred (i.e., `shadow_offset` is 0).
+    /// After the copy, the buffer pointer is updated to point to the shadow buffer.
+    /// This function is idempotent; it does nothing if CoW has already occurred.
     ///
     /// # Safety
     ///
-    /// The `AccountBorrowed` instance must be properly initialized,
-    /// pointing to a valid memory layout that includes a correctly
-    /// sized and located shadow buffer at `shadow_offset`.
+    /// The `AccountBorrowed` instance must be properly initialized with a valid shadow buffer.
     pub unsafe fn cow(&mut self) {
-        // If shadow_offset is 0, CoW has already happened.
         if self.shadow_offset == 0 {
             return;
         }
         self.markers.set(true, IS_DIRTY_MARKER_INDEX);
 
-        // The source is the start of the current active buffer (lamports field).
-        let src = self.lamports as *mut u8;
-        // The destination is the shadow buffer, calculated using the offset.
+        let src = self.buffer.as_ptr();
         let dst = src.offset(self.shadow_offset);
-
-        // Bulk copy the entire active buffer to the shadow buffer.
         dst.copy_from_nonoverlapping(src, self.shadow_offset.unsigned_abs());
 
-        // Translate all internal pointers to point to the new shadow buffer.
-        self.lamports = (self.lamports as *mut u8).offset(self.shadow_offset) as *mut u64;
-        self.owner = (self.owner as *mut u8).offset(self.shadow_offset) as *mut Pubkey;
-        self.remote_slot = (self.remote_slot as *mut u8).offset(self.shadow_offset) as *mut u64;
-        self.flags.translate(self.shadow_offset);
-        self.data.translate(self.shadow_offset);
-
-        // Set shadow_offset to 0 to prevent subsequent CoWs.
+        self.buffer = NonNull::new_unchecked(dst);
         self.shadow_offset = 0;
     }
 
-    /// Commits the changes made in the shadow buffer by incrementing the `shadow_switch` counter.
+    /// Commits changes by incrementing the `shadow_switch` counter.
     ///
-    /// This atomically makes the shadow buffer the new primary buffer for all subsequent readers.
-    /// If no CoW occurred (`shadow_offset != 0`), this is a no-op.
-    #[inline(always)]
+    /// This atomically makes the shadow buffer the new primary buffer.
+    /// No-op if no CoW occurred.
+    ///
+    /// Note: calling this method multiple times after a single `cow()` will increment the
+    /// counter each time, corrupting the shadow switch state. The caller must ensure
+    /// `commit()` is called at most once after each `cow()`.
     pub fn commit(&self) {
-        // Only increment the switch if a CoW has actually happened.
         if self.shadow_offset == 0 {
             self.shadow_switch.increment();
         }
     }
 
-    /// Switch the pointer to the previous buffer, thus rolling back state
+    /// Rolls back to the previous buffer by decrementing the shadow switch.
     ///
     /// # Safety
     ///
-    /// The caller must guarantee that the account has previously initialized a buffer to rollback to.
-    /// This means a prior `commit()` or `cow()` must have been called before invoking this function.
-    #[inline(always)]
+    /// The caller must guarantee that a prior `commit()` was called (not just `cow()`).
+    /// `commit()` increments the counter via `ShadowSwitch::increment`, while `cow()` does not.
+    /// Calling `rollback` without a prior `commit` might cause `fetch_sub` to underflow
+    /// the atomic `u32` counter (e.g., 0 -> u32::MAX), corrupting the `shadow_switch` state.
     pub unsafe fn rollback(&self) {
         (*self.shadow_switch.0).fetch_sub(1, Ordering::Release);
     }
 
-    /// Checks if the owner of a serialized account matches any in the provided slice.
+    // --- Utility methods ---
+
+    /// Checks if the owner matches any in the provided slice.
     ///
-    /// This function performs a direct memory read without full deserialization.
-    /// It returns `None` if the account has zero lamports.
+    /// Returns `None` if the account has zero lamports (non-existent).
     ///
     /// # Safety
     ///
-    /// `memptr` must point to the beginning of a valid, initialized account record
-    /// in memory, including its metadata header.
+    /// `memptr` must point to a valid, initialized account record including metadata header.
     pub unsafe fn any_owner_matches(memptr: *mut u8, others: &[Pubkey]) -> Option<usize> {
-        // Determine the correct buffer to read from based on the shadow switch.
-        let Deserialization {
-            mut deserializer, ..
-        } = AccountSharedData::init_deserialization(memptr);
+        let buffer = AccountSharedData::init_deserialization(memptr).buffer;
 
-        // An account with zero lamports is considered non-existent for this check.
-        if deserializer.read_val::<u64>() == 0 {
+        if *(buffer as *const u64) == 0 {
             return None;
         }
 
-        let owner = deserializer.read::<Pubkey>();
-        others.iter().position(|o| *owner == *o)
+        let owner = buffer.add(OWNER_OFFSET) as *const Pubkey;
+        others.iter().position(|o| *o == *owner)
     }
 
-    /// Creates a sequence lock guard for safe, optimistic reads.
-    ///
-    /// A reader can `lock()` the account, perform its reads,
-    /// and then use `AccountSeqLock::changed()` to verify
-    /// that no writes occurred during the read.
+    /// Creates a sequence lock guard for optimistic reads.
     pub fn lock(&self) -> AccountSeqLock {
-        let counter = self.shadow_switch.clone();
-        let current = counter.counter();
-        AccountSeqLock { counter, current }
+        AccountSeqLock {
+            counter: self.shadow_switch.clone(),
+            current: self.shadow_switch.counter(),
+        }
     }
 
-    /// Re-deserializes the account from its original memory location.
-    ///
-    /// This is used with the sequence lock pattern. If a write occurred during a read,
-    /// the reader can call `reinit` to get a fresh, consistent view of the account.
+    /// Re-deserializes from the original memory location.
     pub fn reinit(&self) -> AccountSharedData {
-        let memptr = self.shadow_switch.inner();
-        // SAFETY: The pointer from `shadow_switch` is guaranteed to point to the
-        // start of the valid memory allocation for this account.
-        unsafe { AccountSharedData::deserialize_from_mmap(memptr).into() }
+        // SAFETY: shadow_switch points to valid memory allocation.
+        unsafe { AccountSharedData::deserialize_from_mmap(self.shadow_switch.inner()).into() }
     }
 
     /// Sets the privileged flag for the account.
     pub fn set_privileged(&mut self, privileged: bool) {
         unsafe { self.cow() };
-        self.flags.set(privileged, PRIVILEGED_FLAG_INDEX);
+        self.set_flag(privileged, PRIVILEGED_FLAG_INDEX);
     }
 
-    /// Indicates whether the account has been
-    /// marked as having privileged runtime access.
+    /// Returns whether the account has privileged runtime access.
     pub fn privileged(&self) -> bool {
-        self.flags.is_set(PRIVILEGED_FLAG_INDEX)
+        self.flag_is_set(PRIVILEGED_FLAG_INDEX)
     }
 
-    /// Indicates whether the account's owner has been modified
+    /// Returns whether the account's owner has been modified.
     pub fn owner_changed(&self) -> bool {
         self.markers.is_set(OWNER_CHANGED_MARKER_INDEX)
     }
 
-    /// Indicates whether the account's balance has been modified
+    /// Returns whether the account's balance has been modified.
     pub fn lamports_changed(&self) -> bool {
         self.markers.is_set(LAMPORTS_CHANGED_MARKER_INDEX)
+    }
+
+    /// Returns the entire active buffer as a static slice.
+    ///
+    /// The buffer contains all serialized fields (lamports, owner, remote_slot, flags,
+    /// data_capacity, data_length) plus the data payload and slack space.
+    pub fn buffer(&self) -> &'static [u8] {
+        let size = AccountSharedData::ACCOUNT_STATIC_SIZE as usize + self.data_cap() as usize;
+        // SAFETY: buffer points to valid memory-mapped data with 'static lifetime.
+        unsafe { std::slice::from_raw_parts(self.buffer.as_ptr(), size) }
     }
 }
 
@@ -315,14 +363,14 @@ pub struct AccountOwned {
     pub(crate) owner: Pubkey,
     /// Remote slot number.
     pub(crate) remote_slot: u64,
-    /// Various boolean flags (bit packed)
-    /// 0. executable
-    /// 1. delegated
-    /// 2. privileged (inaccessable)
-    /// 3. compressed
-    /// 4. undelegating
-    /// 5. confined
-    /// 6. ephemeral
+    /// Various boolean flags (bit packed):
+    /// - bit 0: executable
+    /// - bit 1: delegated
+    /// - bit 2: privileged (unused in Owned variant)
+    /// - bit 3: compressed
+    /// - bit 4: undelegating
+    /// - bit 5: confined
+    /// - bit 6: ephemeral
     pub(crate) flags: BitFlagsOwned,
 }
 
@@ -332,9 +380,9 @@ impl Default for AccountSharedData {
     }
 }
 
-/// A helper struct for deserializing an account from a raw memory pointer.
+/// Helper for deserialization.
 struct Deserialization {
-    deserializer: BytesSerDe,
+    buffer: *mut u8,
     shadow_switch: ShadowSwitch,
     shadow_offset: isize,
 }
@@ -351,52 +399,17 @@ impl BytesSerDe {
     }
 
     /// Writes a value of type `T` to the current position and advances the pointer.
-    #[inline(always)]
     unsafe fn write<T: Sized>(&mut self, val: T) {
         (self.ptr as *mut T).write_unaligned(val);
         self.ptr = self.ptr.add(size_of::<T>());
     }
 
     /// Writes a slice's length (`u32`) followed by its data, and advances the pointer.
-    #[inline(always)]
     unsafe fn write_slice(&mut self, slice: &[u8]) {
         self.write(slice.len() as u32);
         self.ptr
             .copy_from_nonoverlapping(slice.as_ptr(), slice.len());
         self.ptr = self.ptr.add(slice.len());
-    }
-
-    /// Returns a mutable pointer to type `T` at the current position and advances the cursor.
-    #[inline(always)]
-    unsafe fn read<T: Sized>(&mut self) -> *mut T {
-        let value = self.ptr as *mut T;
-        self.ptr = self.ptr.add(size_of::<T>());
-        value
-    }
-
-    /// Reads a `Copy`-able value of type `T` from the current position and advances the cursor.
-    #[inline(always)]
-    unsafe fn read_val<T: Sized + Copy>(&mut self) -> T {
-        let value = (self.ptr as *mut T).read_unaligned();
-        self.ptr = self.ptr.add(size_of::<T>());
-        value
-    }
-
-    /// Reads data capacity and length, then returns a `DataSlice` pointing to the data.
-    #[inline(always)]
-    unsafe fn read_slice(&mut self) -> DataSlice {
-        let cap = self.read_val::<u32>();
-        let len = self.read_val::<u32>();
-        let ptr = self.ptr;
-        // Advance pointer past the data itself
-        self.ptr = self.ptr.add(len as usize);
-        DataSlice { ptr, len, cap }
-    }
-
-    /// Moves the internal pointer by a specified distance.
-    #[inline(always)]
-    unsafe fn jump(&mut self, distance: isize) {
-        self.ptr = self.ptr.offset(distance);
     }
 }
 
@@ -483,6 +496,15 @@ impl AccountSharedData {
         serializer.write(data_capacity);
         // 8. Data Length and Payload
         serializer.write_slice(&acc.data);
+
+        // 9. Zero out slack space (between data end and buffer end)
+        let slack_size = data_capacity as usize - acc.data.len();
+        serializer.ptr.write_bytes(0, slack_size);
+
+        // 10. Zero out the shadow buffer
+        let shadow_start =
+            memptr.add(Self::SERIALIZED_META_SIZE as usize + single_buffer_capacity as usize);
+        shadow_start.write_bytes(0, single_buffer_capacity as usize);
     }
 
     /// Deserializes an `AccountBorrowed` from a memory-mapped region.
@@ -494,52 +516,41 @@ impl AccountSharedData {
     /// must match the one produced by `serialize_to_mmap`.
     pub unsafe fn deserialize_from_mmap(memptr: *mut u8) -> AccountBorrowed {
         let Deserialization {
-            mut deserializer,
+            buffer,
             shadow_switch,
             shadow_offset,
         } = Self::init_deserialization(memptr);
 
-        // Read pointers to the fields in the active buffer.
-        let lamports = deserializer.read::<u64>();
-        let owner = deserializer.read::<Pubkey>();
-        let remote_slot = deserializer.read::<u64>();
-        let flags = deserializer.read::<u32>();
-        let data = deserializer.read_slice();
-
         AccountBorrowed {
-            lamports,
-            owner,
-            remote_slot,
-            data,
+            buffer: NonNull::new_unchecked(buffer),
             shadow_offset,
             shadow_switch,
-            flags: BitFlags(flags),
             markers: BitFlagsOwned::default(),
         }
     }
 
-    /// Initializes a deserializer by reading the metadata header and positioning
-    /// the cursor at the start of the active buffer (primary or shadow).
+    /// Reads metadata header and computes pointer to active buffer.
     unsafe fn init_deserialization(memptr: *mut u8) -> Deserialization {
-        let mut deserializer = BytesSerDe::new(memptr);
-
-        // Read metadata header.
-        let shadow_switch = ShadowSwitch::from(deserializer.read::<AtomicU32>());
-        let mut shadow_offset = deserializer.read_val::<u32>() as isize;
+        let shadow_switch = ShadowSwitch::from(memptr as *mut AtomicU32);
+        let shadow_offset = *(memptr.add(size_of::<u32>()) as *const u32) as isize;
 
         // Check if the shadow switch is odd. An odd value means the shadow buffer is active.
         let is_shadow_active = shadow_switch.counter() % 2 == 1;
 
-        if is_shadow_active {
-            // The shadow buffer is active. Jump the deserializer to the start of it.
-            deserializer.jump(shadow_offset);
+        // Skip the metadata header to get to the start of the primary buffer.
+        let buffer = memptr.add(Self::SERIALIZED_META_SIZE as usize);
+
+        let (buffer, shadow_offset) = if is_shadow_active {
+            // The shadow buffer is active. Jump to the start of it.
             // Invert the offset. Now, a CoW will copy from the shadow buffer *back*
             // to the primary buffer.
-            shadow_offset = -shadow_offset;
-        }
+            (buffer.offset(shadow_offset), -shadow_offset)
+        } else {
+            (buffer, shadow_offset)
+        };
 
         Deserialization {
-            deserializer,
+            buffer,
             shadow_offset,
             shadow_switch,
         }
@@ -554,49 +565,19 @@ impl AccountSharedData {
         }
     }
 
-    /// If the account is Borrowed, rollback its state to previous buffer
-    /// Note: Does nothing if the account is Owned
+    /// Rolls back a Borrowed account to its previous buffer state.
+    /// Note: Does nothing if the account is Owned.
     ///
     /// # Safety
     ///
     /// The caller must guarantee that if this is a `Borrowed` variant, the account has
     /// previously initialized a valid buffer to rollback to. This requires a prior `commit()`
-    /// or `cow()` call. If the account is `Owned`, this function has no effect and is always safe.
+    /// call (not just `cow()`). `commit()` increments the counter via `ShadowSwitch::increment`,
+    /// while `cow()` does not. If the account is `Owned`, this function has no effect and is always safe.
     pub unsafe fn rollback(&self) {
-        match self {
-            Self::Borrowed(acc) => acc.rollback(),
-            Self::Owned(_) => (),
+        if let Self::Borrowed(acc) = self {
+            acc.rollback();
         }
-    }
-}
-
-impl BitFlags {
-    /// Checks if the bit at `index` is set.
-    pub(crate) fn is_set(&self, index: u32) -> bool {
-        // SAFETY: The pointer `self.0` is guaranteed to be valid for the lifetime
-        // of the parent `AccountBorrowed`. The read is atomic-like in practice on
-        // supported platforms for aligned u32.
-        (unsafe { *self.0 } >> index) & 1 == 1
-    }
-
-    /// Sets or clears the bit at `index`.
-    pub(crate) fn set(&mut self, val: bool, index: u32) {
-        // SAFETY: The pointer `self.0` is valid. Modifications only occur after a CoW,
-        // so we are writing to a private shadow buffer, preventing data races.
-        unsafe {
-            if val {
-                *self.0 |= 1 << index;
-            } else {
-                *self.0 &= !(1 << index);
-            }
-        }
-    }
-
-    /// Translates the internal pointer by a given offset, used during CoW.
-    fn translate(&mut self, offset: isize) {
-        // SAFETY: This is only called during CoW, where `offset` is a valid
-        // distance to the corresponding field in the shadow buffer.
-        self.0 = unsafe { (self.0 as *mut u8).offset(offset) as *mut u32 };
     }
 }
 
@@ -634,7 +615,6 @@ impl From<*mut AtomicU32> for ShadowSwitch {
 
 impl ShadowSwitch {
     /// Atomically loads the current value of the counter.
-    #[inline(always)]
     pub(crate) fn counter(&self) -> u32 {
         // SAFETY: `self.0` points to a valid `AtomicU32` within the mmap region.
         // Atomic operations ensure thread safety. `Acquire` ordering ensures that
@@ -643,7 +623,6 @@ impl ShadowSwitch {
     }
 
     /// Atomically increments the counter.
-    #[inline(always)]
     fn increment(&self) {
         // SAFETY: `self.0` points to a valid `AtomicU32`.
         // `Release` ordering ensures that all writes to the shadow buffer are completed
@@ -653,7 +632,6 @@ impl ShadowSwitch {
     }
 
     /// Returns the raw pointer to the start of the account's memory allocation.
-    #[inline(always)]
     fn inner(&self) -> *mut u8 {
         self.0 as *mut u8
     }
@@ -685,13 +663,6 @@ impl DerefMut for DataSlice {
 }
 
 impl DataSlice {
-    /// Translates the internal data pointer by `offset`, used during CoW.
-    fn translate(&mut self, offset: isize) {
-        // SAFETY: This is only called from `AccountBorrowed::cow`, where `offset` is
-        // a valid, in-bounds distance to the shadow buffer's data field.
-        self.ptr = unsafe { self.ptr.offset(offset) }
-    }
-
     /// Updates the length of the data slice, both in this struct and in the underlying memory.
     ///
     /// # Safety
@@ -701,9 +672,9 @@ impl DataSlice {
     pub(crate) unsafe fn set_len(&mut self, len: usize) {
         self.len = len as u32;
         // This is a performance hack that directly writes the new length to its known
-        // location in memory, which is `RELATIVE_DATA_LEN_POINTER_OFFSET` bytes
+        // location in memory, which is `RELATIVE_DATA_LEN_OFFSET` bytes
         // before the data pointer itself. This avoids needing a separate pointer.
-        (self.ptr.offset(RELATIVE_DATA_LEN_POINTER_OFFSET) as *mut u32).write_unaligned(len as u32);
+        (self.ptr.offset(RELATIVE_DATA_LEN_OFFSET) as *mut u32).write_unaligned(len as u32);
     }
 }
 
