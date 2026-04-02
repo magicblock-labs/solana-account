@@ -1,3 +1,4 @@
+#![cfg_attr(feature = "frozen-abi", feature(min_specialization))]
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 //! The Solana [`Account`] type.
 
@@ -10,10 +11,10 @@ use qualifier_attr::qualifiers;
 #[cfg(feature = "serde")]
 use serde::ser::{Serialize, Serializer};
 #[cfg(feature = "frozen-abi")]
-use solana_frozen_abi::abi_example::AbiExample;
+use solana_frozen_abi_macro::AbiExample;
 use solana_sdk_ids::{bpf_loader, bpf_loader_deprecated, bpf_loader_upgradeable, loader_v4};
 #[cfg(feature = "bincode")]
-use solana_sysvar::Sysvar;
+use solana_sysvar::SysvarSerialize;
 
 #[cfg(any(test, feature = "dev-context-only-utils"))]
 pub mod test_utils;
@@ -1068,25 +1069,22 @@ pub const DUMMY_INHERITABLE_ACCOUNT_FIELDS: InheritableAccountFields = (1, INITI
 /// Return the information required to construct an `AccountInfo`.  Used by the
 /// `AccountInfo` conversion implementations.
 impl solana_account_info::Account for Account {
-    fn get(&mut self) -> (&mut u64, &mut [u8], &Pubkey, bool, Epoch) {
-        (
-            &mut self.lamports,
-            &mut self.data,
-            &self.owner,
-            self.executable,
-            self.rent_epoch,
-        )
+    fn get(&mut self) -> (&mut u64, &mut [u8], &Pubkey, bool) {
+        (&mut self.lamports, &mut self.data, &self.owner, self.executable)
     }
 }
 #[cfg(feature = "bincode")]
 // Serialize a `Sysvar` into an `Account`'s data.
-pub fn to_account<S: Sysvar, T: WritableAccount>(sysvar: &S, account: &mut T) -> Option<()> {
+pub fn to_account<S: SysvarSerialize, T: WritableAccount>(
+    sysvar: &S,
+    account: &mut T,
+) -> Option<()> {
     bincode::serialize_into(account.data_as_mut_slice(), sysvar).ok()
 }
 
 #[cfg(feature = "bincode")]
 /// Create an `Account` from a `Sysvar`.
-pub fn create_account_shared_data_with_fields<S: Sysvar>(
+pub fn create_account_shared_data_with_fields<S: SysvarSerialize>(
     sysvar: &S,
     fields: InheritableAccountFields,
 ) -> AccountSharedData {
@@ -1095,11 +1093,12 @@ pub fn create_account_shared_data_with_fields<S: Sysvar>(
 
 #[cfg(feature = "bincode")]
 /// Create a `Sysvar` from an `Account`'s data.
-pub fn from_account<S: Sysvar, T: ReadableAccount>(account: &T) -> Option<S> {
+pub fn from_account<S: SysvarSerialize, T: ReadableAccount>(account: &T) -> Option<S> {
     bincode::deserialize(account.data()).ok()
 }
 
-pub fn create_account_with_fields<S: Sysvar>(
+#[cfg(feature = "bincode")]
+pub fn create_account_with_fields<S: SysvarSerialize>(
     sysvar: &S,
     (lamports, rent_epoch): InheritableAccountFields,
 ) -> Account {
@@ -1112,7 +1111,7 @@ pub fn create_account_with_fields<S: Sysvar>(
 }
 
 #[cfg(feature = "bincode")]
-pub fn create_account_shared_data_for_test<S: Sysvar>(sysvar: &S) -> AccountSharedData {
+pub fn create_account_shared_data_for_test<S: SysvarSerialize>(sysvar: &S) -> AccountSharedData {
     AccountSharedData::from(create_account_with_fields(
         sysvar,
         DUMMY_INHERITABLE_ACCOUNT_FIELDS,
@@ -1134,7 +1133,6 @@ pub fn create_is_signer_account_infos<'a>(
                 &mut account.data,
                 &account.owner,
                 account.executable,
-                account.rent_epoch,
             )
         })
         .collect()
