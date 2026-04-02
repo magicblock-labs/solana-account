@@ -2,7 +2,7 @@
 name = "solana-account"
 description = "Solana Account type"
 documentation = "https://docs.rs/solana-account"
-version = "2.2.1"
+version = "3.4.0"
 edition = "2021"
 
 [dependencies]
@@ -17,8 +17,12 @@ solana-instruction = "3"
 solana-pubkey = "3"
 solana-sysvar = "3"
 solana-sdk-ids = "3"
-solana-frozen-abi = { version = "3", optional = true, default-features = false, features = ["frozen-abi"] }
-solana-frozen-abi-macro = { version = "3", optional = true, default-features = false, features = ["frozen-abi"] }
+solana-frozen-abi = { version = "3", optional = true, default-features = false, features = [
+  "frozen-abi",
+] }
+solana-frozen-abi-macro = { version = "3", optional = true, default-features = false, features = [
+  "frozen-abi",
+] }
 
 
 [features]
