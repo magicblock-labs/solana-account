@@ -1062,6 +1062,22 @@ impl AccountSharedData {
     pub fn serialize_data<T: serde::Serialize>(&mut self, state: &T) -> Result<(), bincode::Error> {
         shared_serialize_data(self, state)
     }
+    pub fn create_from_existing_shared_data(
+        lamports: u64,
+        data: Arc<Vec<u8>>,
+        owner: Pubkey,
+        executable: bool,
+        _rent_epoch: Epoch,
+    ) -> AccountSharedData {
+        let mut owned = AccountOwned {
+            lamports,
+            data,
+            owner,
+            ..Default::default()
+        };
+        owned.flags.set(executable, EXECUTABLE_FLAG_INDEX);
+        AccountSharedData::Owned(owned)
+    }
 }
 pub type InheritableAccountFields = (u64, Epoch);
 pub const DUMMY_INHERITABLE_ACCOUNT_FIELDS: InheritableAccountFields = (1, INITIAL_RENT_EPOCH);
@@ -1070,7 +1086,12 @@ pub const DUMMY_INHERITABLE_ACCOUNT_FIELDS: InheritableAccountFields = (1, INITI
 /// `AccountInfo` conversion implementations.
 impl solana_account_info::Account for Account {
     fn get(&mut self) -> (&mut u64, &mut [u8], &Pubkey, bool) {
-        (&mut self.lamports, &mut self.data, &self.owner, self.executable)
+        (
+            &mut self.lamports,
+            &mut self.data,
+            &self.owner,
+            self.executable,
+        )
     }
 }
 #[cfg(feature = "bincode")]
